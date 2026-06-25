@@ -1,0 +1,30 @@
+# Rust build
+/target/
+
+# Local DB + uploaded objects
+/data/
+*.db
+*.db-shm
+*.db-wal
+
+# Secrets (keep *.example templates)
+.env
+.env.*
+!.env.example
+!scripts/env.example
+
+# Dev script deps (scripts/package.json)
+scripts/node_modules/
+
+# Local dev run state
+scripts/.last-listing-id
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Keys (never commit)
+*.pem
+*.key
+id_rsa*

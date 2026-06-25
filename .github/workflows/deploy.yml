@@ -1,0 +1,59 @@
+name: Deploy API → VPS
+
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+# GitHub Actions secrets (http402-forge-api repo):
+#   FORGE_VPS_HOST, FORGE_VPS_USER, FORGE_VPS_SSH_KEY
+# Optional:
+#   FORGE_VPS_REPO_PATH  (default /opt/src/http402-forge-api)
+
+jobs:
+  deploy:
+    name: API → VPS (Docker)
+    runs-on: ubuntu-latest
+    env:
+      FORGE_VPS_REPO_PATH: ${{ secrets.FORGE_VPS_REPO_PATH }}
+    steps:
+      - name: Select cluster
+        run: |
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            echo "CLUSTER=mainnet" >> "$GITHUB_ENV"
+            echo "HEALTH_URL=https://forge.http402.trade/health" >> "$GITHUB_ENV"
+          else
+            echo "CLUSTER=devnet" >> "$GITHUB_ENV"
+            echo "HEALTH_URL=https://preview.forge.http402.trade/health" >> "$GITHUB_ENV"
+          fi
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.FORGE_VPS_HOST }}
+          username: ${{ secrets.FORGE_VPS_USER }}
+          key: ${{ secrets.FORGE_VPS_SSH_KEY }}
+          script_stop: true
+          envs: CLUSTER,FORGE_VPS_REPO_PATH
+          script: |
+            set -euo pipefail
+            REPO="${FORGE_VPS_REPO_PATH:-/opt/src/http402-forge-api}"
+            cd "$REPO"
+            git fetch origin
+            git checkout "${{ github.ref_name }}"
+            git pull --ff-only origin "${{ github.ref_name }}"
+            sudo bash scripts/docker/forge-deploy.sh \
+              --cluster "$CLUSTER" \
+              --repo-root "$REPO"
+
+      - name: Smoke test API health
+        run: |
+          URL="${{ env.HEALTH_URL }}"
+          for i in 1 2 3 4 5; do
+            if curl -fsS "$URL" | jq -e '.status == "healthy"' >/dev/null; then
+              echo "✅ $URL"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::warning::Health check failed for $URL"

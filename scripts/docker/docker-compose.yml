@@ -1,0 +1,37 @@
+# Reference compose for local smoke tests. Production uses systemd (see README.md).
+
+services:
+  forge-devnet:
+    build:
+      context: ../..
+      dockerfile: scripts/docker/Dockerfile
+    image: forge-devnet:local
+    network_mode: host
+    env_file:
+      - forge-devnet.env.example
+    environment:
+      - LOCAL_STORAGE_PATH=/app/data/objects
+      - DATABASE_URL=sqlite:/app/data/forge.db
+      - BIND_ADDR=127.0.0.1:8092
+    volumes:
+      - devnet-data:/app/data
+    restart: on-failure
+
+  forge-mainnet:
+    build:
+      context: ../..
+      dockerfile: scripts/docker/Dockerfile
+    image: forge-mainnet:local
+    network_mode: host
+    env_file:
+      - forge-mainnet.env.example
+    environment:
+      - LOCAL_STORAGE_PATH=/app/data/objects
+      - BIND_ADDR=127.0.0.1:8093
+    volumes:
+      - mainnet-data:/app/data
+    restart: on-failure
+
+volumes:
+  devnet-data:
+  mainnet-data:

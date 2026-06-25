@@ -1,0 +1,42 @@
+# systemd unit for Dockerized http402-forge-api on Solana devnet (preview stack).
+#
+#   sudo install -m 0644 forge-devnet.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now forge-devnet.service
+
+[Unit]
+Description=http402.trade Forge API (devnet / preview) — Dockerized
+Documentation=https://github.com/miralandlabs/x402
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=3
+
+[Service]
+TimeoutStartSec=45
+TimeoutStopSec=20
+
+ExecStartPre=-/usr/bin/docker rm -f forge-devnet
+ExecStart=/usr/bin/docker run \
+    --rm \
+    --name forge-devnet \
+    --network host \
+    --pull=never \
+    --env-file /etc/forge/devnet.env \
+    -e LOCAL_STORAGE_PATH=/app/data/objects \
+    -v /var/lib/forge/devnet/data:/app/data \
+    --memory 1536m \
+    --cpus 1.5 \
+    --log-driver journald \
+    --log-opt tag=forge-devnet \
+    forge-devnet:current
+
+ExecStop=-/usr/bin/docker stop -t 20 forge-devnet
+
+Restart=on-failure
+RestartSec=5
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target

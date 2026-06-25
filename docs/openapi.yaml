@@ -1,0 +1,293 @@
+openapi: 3.1.0
+info:
+  title: http402-forge-api
+  version: 0.1.0
+  description: |
+    Forge marketplace — list, preview, pay-to-download via x402 v2.
+    JSON responses use **camelCase** field names.
+servers:
+  - url: https://api.http402.trade
+  - url: http://127.0.0.1:8092
+components:
+  schemas:
+    ListingPublic:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        sellerWallet: { type: string }
+        displayName: { type: string, nullable: true }
+        title: { type: string }
+        description: { type: string }
+        category:
+          type: string
+          enum: [art, text, audio, video, prompt_pack]
+        priceMicroUsdc: { type: integer }
+        contentType: { type: string }
+        byteSize: { type: integer }
+        agentFriendly: { type: boolean }
+        deliveryScheme: { type: string, enum: [exact, escrow] }
+        previewUrl: { type: string, format: uri }
+        createdAt: { type: string, format: date-time }
+    ListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/ListingPublic" }
+        total: { type: integer }
+    SellerChallenge:
+      type: object
+      properties:
+        message: { type: string }
+        expiresAt: { type: string, format: date-time }
+    SellerStatus:
+      type: object
+      properties:
+        vaultActivated: { type: boolean }
+        canSell: { type: boolean }
+        vaultPda: { type: string, nullable: true }
+        feeBps: { type: integer, nullable: true }
+        protocolFeePercent: { type: string, nullable: true }
+        sellerDashboardUrl: { type: string, format: uri }
+        vaultCheckEnforced: { type: boolean }
+    ProvisionRequest:
+      type: object
+      required: [sellerWallet]
+      properties:
+        sellerWallet: { type: string }
+        asset: { type: string, default: USDC }
+    FieldError:
+      type: object
+      properties:
+        field: { type: string }
+        message: { type: string }
+    ValidationError:
+      type: object
+      properties:
+        error: { type: string, example: Validation error }
+        details:
+          type: array
+          items: { $ref: "#/components/schemas/FieldError" }
+    PaymentRequired:
+      type: object
+      description: x402 v2 payment required body (402 response)
+      properties:
+        x402Version: { type: integer }
+        resource: { type: object }
+        accepts:
+          type: array
+          items: { type: object }
+        extensions: { type: object }
+    ErrorBody:
+      type: object
+      properties:
+        error: { type: string }
+        message: { type: string }
+paths:
+  /api/v1/seller/challenge:
+    get:
+      summary: Issue a one-time challenge for listing creation
+      parameters:
+        - in: query
+          name: seller_wallet
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Challenge message to sign with seller wallet
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SellerChallenge" }
+        "422":
+          description: Invalid wallet
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ValidationError" }
+  /api/v1/seller/status:
+    get:
+      summary: Seller SplitVault activation status
+      parameters:
+        - in: query
+          name: seller_wallet
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Vault status for Sell page gate
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SellerStatus" }
+        "422":
+          description: Invalid wallet
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ValidationError" }
+  /api/v1/seller/provision-tx:
+    post:
+      summary: Build SplitVault provision transaction
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProvisionRequest" }
+      responses:
+        "200":
+          description: Base64 transaction or already provisioned
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "422":
+          description: Invalid wallet
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ValidationError" }
+  /api/v1/listings:
+    get:
+      summary: List active listings
+      parameters:
+        - in: query
+          name: q
+          description: Search title or description (case-insensitive, max 80 chars)
+          schema: { type: string, maxLength: 80 }
+        - in: query
+          name: category
+          schema:
+            type: string
+            enum: [art, text, audio, video, prompt_pack]
+        - in: query
+          name: agent_friendly
+          schema: { type: boolean }
+        - in: query
+          name: sort
+          schema: { type: string, enum: [newest, price_asc, price_desc], default: newest }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 20, minimum: 1, maximum: 100 }
+        - in: query
+          name: offset
+          schema: { type: integer, default: 0, minimum: 0 }
+      responses:
+        "200":
+          description: Listing page
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ListResponse" }
+    post:
+      summary: Create listing (multipart)
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - seller_wallet
+                - seller_challenge
+                - seller_signature
+                - title
+                - category
+                - price_usdc
+                - asset
+              properties:
+                seller_wallet: { type: string }
+                seller_challenge:
+                  type: string
+                  description: Exact message from GET /api/v1/seller/challenge
+                seller_signature:
+                  type: string
+                  description: Base64 ed25519 signature over seller_challenge
+                title: { type: string, maxLength: 120 }
+                description: { type: string, maxLength: 2000 }
+                category:
+                  type: string
+                  enum: [art, text, audio, video, prompt_pack]
+                price_usdc: { type: string, example: "0.05" }
+                agent_friendly: { type: boolean, default: false }
+                asset: { type: string, format: binary }
+                preview: { type: string, format: binary }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ListingPublic" }
+        "403":
+          description: Invalid signature or seller SplitVault not activated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorBody" }
+        "422":
+          description: Validation error
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ValidationError" }
+  /api/v1/listings/{id}:
+    get:
+      summary: Get one listing
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ListingPublic" }
+        "404":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorBody" }
+  /api/v1/listings/{id}/preview:
+    get:
+      summary: Free preview (image bytes, text snippet, or uploaded preview)
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Preview bytes (Content-Type varies)
+        "404":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorBody" }
+  /api/v1/listings/{id}/download:
+    get:
+      summary: Pay-to-download (402 then streamed asset)
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+        - in: header
+          name: PAYMENT-SIGNATURE
+          schema: { type: string }
+          description: Base64 JSON proof from facilitator build+sign flow
+      responses:
+        "402":
+          description: Payment required
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PaymentRequired" }
+        "200":
+          description: Asset file stream
+        "403":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorBody" }
+  /api/v1/leaderboards:
+    get:
+      summary: 24h leaderboard aggregates
+      responses:
+        "200":
+          description: Leaderboard JSON
+  /api/v1/events:
+    get:
+      summary: SSE sales feed
+      responses:
+        "200":
+          description: text/event-stream

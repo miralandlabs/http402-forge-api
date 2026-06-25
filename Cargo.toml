@@ -1,0 +1,46 @@
+[package]
+name = "http402-forge-api"
+version = "0.1.0"
+edition = "2021"
+description = "http402.trade Forge marketplace API (x402 v2)"
+license = "Apache-2.0"
+
+[[bin]]
+name = "http402-forge-api"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+async-trait = "0.1"
+axum = { version = "0.8", features = ["multipart"] }
+base64 = "0.22"
+bytes = "1"
+bs58 = "0.5"
+chrono = { version = "0.4", features = ["serde"] }
+deadpool-postgres = "0.14"
+deadpool-sqlite = "0.12"
+dotenvy = "0.15"
+ed25519-dalek = { version = "2", features = ["std"] }
+futures = "0.3"
+http = "1"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+mime_guess = "2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+rust-s3 = { version = "0.35", default-features = false, features = ["tokio-rustls-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+tempfile = "3.20"
+thiserror = "2.0"
+tokio = { version = "1.49", features = ["full", "rt-multi-thread"] }
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-uuid-1"] }
+postgres-native-tls = "0.5"
+native-tls = "0.2"
+tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-util = { version = "0.7", features = ["io"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors", "limit"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1.19", features = ["v4", "serde"] }
