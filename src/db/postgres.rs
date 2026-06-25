@@ -1,3 +1,5 @@
+use std::io::BufReader;
+use std::path::Path;
 use std::time::Duration;
 
 use deadpool_postgres::{Config, Pool, PoolConfig, Runtime};
@@ -14,6 +16,11 @@ use tokio_postgres::types::ToSql;
 
 const SCHEMA: &str = include_str!("../../migrations/postgres/001_init.sql");
 
+fn is_supabase_host(database_url: &str) -> bool {
+    let lower = database_url.to_ascii_lowercase();
+    lower.contains("supabase.co") || lower.contains("supabase.com")
+}
+
 fn uses_tls(database_url: &str) -> bool {
     let lower = database_url.to_ascii_lowercase();
     lower.contains("sslmode=require")
@@ -22,18 +29,73 @@ fn uses_tls(database_url: &str) -> bool {
 }
 
 fn validate_database_url(database_url: &str) -> AppResult<()> {
-    let lower = database_url.to_ascii_lowercase();
-    if lower.contains("supabase.co") && !uses_tls(database_url) {
+    if is_supabase_host(database_url) && !uses_tls(database_url) {
         return Err(AppError::Internal(anyhow::anyhow!(
             "Supabase DATABASE_URL must include ?sslmode=require (or verify-full)"
+        )));
+    }
+    if is_supabase_host(database_url) && supabase_ca_path().is_none() {
+        return Err(AppError::Internal(anyhow::anyhow!(
+            "Supabase requires DATABASE_SSL_ROOT_CERT in /etc/forge/*.env \
+             (preview: /etc/forge/ssl/supabase-preview-ca.crt, \
+             production: /etc/forge/ssl/supabase-prod-ca.crt). \
+             Download CA from Supabase Dashboard → Database → SSL Configuration"
         )));
     }
     Ok(())
 }
 
-fn make_rustls_connector() -> AppResult<MakeRustlsConnect> {
+fn supabase_ca_path() -> Option<String> {
+    let path = std::env::var("DATABASE_SSL_ROOT_CERT")
+        .ok()?
+        .trim()
+        .to_string();
+    if path.is_empty() || !Path::new(&path).is_file() {
+        return None;
+    }
+    Some(path)
+}
+
+fn load_pem_into_store(path: &str, roots: &mut RootCertStore) -> AppResult<()> {
+    let file = std::fs::File::open(path).map_err(|e| {
+        AppError::Internal(anyhow::anyhow!("open DATABASE_SSL_ROOT_CERT {path}: {e}"))
+    })?;
+    let mut reader = BufReader::new(file);
+    let certs = rustls_pemfile::certs(&mut reader)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| {
+            AppError::Internal(anyhow::anyhow!("parse DATABASE_SSL_ROOT_CERT {path}: {e}"))
+        })?;
+    if certs.is_empty() {
+        return Err(AppError::Internal(anyhow::anyhow!(
+            "DATABASE_SSL_ROOT_CERT {path} contains no certificates"
+        )));
+    }
+    for cert in certs {
+        roots
+            .add(cert)
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("invalid cert in {path}: {e}")))?;
+    }
+    Ok(())
+}
+
+fn make_rustls_connector(database_url: &str) -> AppResult<MakeRustlsConnect> {
     let mut roots = RootCertStore::empty();
     roots.extend(TLS_SERVER_ROOTS.iter().cloned());
+
+    if is_supabase_host(database_url) {
+        let path = supabase_ca_path().ok_or_else(|| {
+            AppError::Internal(anyhow::anyhow!(
+                "Supabase DATABASE_SSL_ROOT_CERT missing or not readable (set in /etc/forge/*.env)"
+            ))
+        })?;
+        load_pem_into_store(&path, &mut roots)?;
+    }
+
+    for cert in rustls_native_certs::load_native_certs().certs {
+        let _ = roots.add(cert);
+    }
+
     let config = ClientConfig::builder()
         .with_root_certificates(roots)
         .with_no_client_auth();
@@ -52,7 +114,7 @@ pub fn connect_pool(database_url: &str) -> AppResult<Pool> {
         ..PoolConfig::default()
     });
     let pool = if uses_tls(database_url) {
-        let tls = make_rustls_connector()?;
+        let tls = make_rustls_connector(database_url)?;
         cfg.create_pool(Some(Runtime::Tokio1), tls)
     } else {
         cfg.create_pool(Some(Runtime::Tokio1), NoTls)
@@ -65,7 +127,7 @@ pub async fn migrate(pool: &Pool) -> AppResult<()> {
         .get()
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!(
-            "postgres conn: {e} (check DATABASE_URL, URL-encoded password, Session pooler + ?sslmode=require, Supabase IP allowlist)"
+            "postgres conn: {e:#} (Supabase: DATABASE_SSL_ROOT_CERT must point at the project CA PEM)"
         )))?;
     client
         .batch_execute(SCHEMA)

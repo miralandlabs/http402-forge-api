@@ -16,6 +16,7 @@ bash "${SCRIPT_DIR}/forge-host-prereqs.sh"
 
 echo "[install] directories"
 install -d -m 0750 /etc/forge
+install -d -m 0755 /etc/forge/ssl
 install -d -m 0750 /var/lib/forge/devnet/data
 install -d -m 0750 /var/lib/forge/mainnet/data
 
