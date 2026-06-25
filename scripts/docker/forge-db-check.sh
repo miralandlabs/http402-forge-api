@@ -104,7 +104,7 @@ if [[ "$DATABASE_URL" == *supabase.co* || "$DATABASE_URL" == *supabase.com* ]]; 
             --env-file "$ENV_FILE" \
             -e PGSSLMODE=require \
             -e "PGSSLROOTCERT=${SSL_ROOT_CERT}" \
-            -v "${SSL_ROOT_CERT}:${SSL_ROOT_CERT}:ro" \
+            -v /etc/forge/ssl:/etc/forge/ssl:ro \
             postgres:16-alpine \
             psql "$DATABASE_URL" -c 'SELECT 1' >/dev/null 2>&1; then
             echo "[db-check] Postgres TLS OK"

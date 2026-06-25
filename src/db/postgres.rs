@@ -46,11 +46,34 @@ fn validate_database_url(database_url: &str) -> AppResult<()> {
 }
 
 fn supabase_ca_path() -> Option<String> {
-    let path = std::env::var("DATABASE_SSL_ROOT_CERT")
-        .ok()?
-        .trim()
-        .to_string();
-    if path.is_empty() || !Path::new(&path).is_file() {
+    let path = match std::env::var("DATABASE_SSL_ROOT_CERT") {
+        Ok(val) => {
+            let trimmed = val.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        }
+        Err(_) => None,
+    };
+
+    let path = path.unwrap_or_else(|| {
+        let solana_cluster = std::env::var("SOLANA_CLUSTER").unwrap_or_default();
+        let fallback = if solana_cluster == "mainnet" {
+            "/etc/forge/ssl/supabase-prod-ca.crt".to_string()
+        } else {
+            "/etc/forge/ssl/supabase-preview-ca.crt".to_string()
+        };
+        tracing::info!(
+            "DATABASE_SSL_ROOT_CERT not set. Falling back to default CA path for cluster '{}': {}",
+            solana_cluster,
+            fallback
+        );
+        fallback
+    });
+
+    if !Path::new(&path).is_file() {
         return None;
     }
     Some(path)

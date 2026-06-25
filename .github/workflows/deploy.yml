@@ -56,4 +56,5 @@ jobs:
             fi
             sleep 5
           done
-          echo "::warning::Health check failed for $URL"
+          echo "❌ Health check failed for $URL" >&2
+          exit 1
