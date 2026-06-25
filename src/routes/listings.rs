@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::db::normalize_search;
+use crate::db::ListingFilterBinds;
 use crate::db::ListingRow;
 use crate::error::{AppError, AppResult};
 use crate::models::{
@@ -29,6 +30,7 @@ pub struct ListQuery {
     pub category: Option<String>,
     pub agent_friendly: Option<String>,
     pub q: Option<String>,
+    pub seller_wallet: Option<String>,
     #[serde(default = "default_sort")]
     pub sort: String,
     #[serde(default = "default_limit")]
@@ -73,13 +75,19 @@ pub async fn list(
     let agent_friendly = parse_optional_bool(q.agent_friendly.as_deref());
     let search = normalize_search(q.q);
     let search_ref = search.as_deref();
-    let total = state
-        .db
-        .count_listings(cat, agent_friendly, search_ref)
-        .await?;
+    let seller_wallet = q
+        .seller_wallet
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(w) = seller_wallet {
+        validate_wallet(w).map_err(|m| AppError::validation("seller_wallet", m))?;
+    }
+    let filters = ListingFilterBinds::new(cat, agent_friendly, search_ref, seller_wallet);
+    let total = state.db.count_listings(&filters).await?;
     let rows = state
         .db
-        .list_listings(cat, agent_friendly, search_ref, &q.sort, q.limit, q.offset)
+        .list_listings(&filters, &q.sort, q.limit, q.offset)
         .await?;
     let base = state.config.seller_public_base_url.clone();
     let items = rows

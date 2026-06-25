@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Build + deploy Forge API Docker image for one cluster (devnet preview or mainnet prod).
 #
-# Usage (as root, from x402 monorepo checkout):
-#   sudo bash http402-forge-api/scripts/docker/forge-deploy.sh --cluster devnet
-#   sudo bash http402-forge-api/scripts/docker/forge-deploy.sh --cluster mainnet
-#   sudo bash http402-forge-api/scripts/docker/forge-deploy.sh --cluster devnet --rollback
+# Usage (as root, from repo checkout):
+#   sudo bash scripts/docker/forge-deploy.sh --cluster devnet
+#   sudo bash scripts/docker/forge-deploy.sh --cluster mainnet
+#   sudo bash scripts/docker/forge-deploy.sh --cluster devnet --rollback
 #
 set -euo pipefail
 
@@ -12,6 +12,7 @@ CLUSTER="devnet"
 SKIP_BUILD=0
 NO_CACHE=0
 ROLLBACK=0
+SKIP_DB_CHECK=0
 HEALTH_PORT=""
 HEALTH_TIMEOUT=60
 REPO_ROOT=""
@@ -25,10 +26,11 @@ while [[ $# -gt 0 ]]; do
         --skip-build) SKIP_BUILD=1; shift;;
         --no-cache) NO_CACHE=1; shift;;
         --rollback) ROLLBACK=1; shift;;
+        --skip-db-check) SKIP_DB_CHECK=1; shift;;
         --repo-root) REPO_ROOT="$2"; shift 2;;
         --repo-root=*) REPO_ROOT="${1#*=}"; shift;;
         -h|--help)
-            sed -n '2,$ s/^# \{0,1\}//p' "$0" | head -24
+            sed -n '2,$ s/^# \{0,1\}//p' "$0" | head -28
             exit 0;;
         *) echo "unknown arg: $1" >&2; exit 64;;
     esac
@@ -89,6 +91,38 @@ detect_health_port() {
     HEALTH_PORT=$([[ "$CLUSTER" == devnet ]] && echo 8092 || echo 8093)
 }
 
+stop_cluster() {
+    echo "[deploy] stopping ${SERVICE} and removing ${CONTAINER_NAME}…"
+    systemctl stop "$SERVICE" 2>/dev/null || true
+    docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
+    systemctl reset-failed "$SERVICE" 2>/dev/null || true
+}
+
+warn_port_conflict() {
+    detect_health_port
+    local port="$HEALTH_PORT"
+    if ! command -v ss >/dev/null 2>&1; then
+        return 0
+    fi
+    if ss -ltn "sport = :$port" 2>/dev/null | grep -q LISTEN; then
+        echo "[deploy] WARNING: port ${port} is already listening:" >&2
+        ss -ltnp "sport = :$port" 2>&1 || true
+        echo "[deploy] hint: stop the other forge unit or free port ${port}" >&2
+    fi
+}
+
+preflight_database() {
+    [[ "$SKIP_DB_CHECK" -eq 1 ]] && return 0
+    if [[ -x "${SCRIPT_DIR}/forge-db-check.sh" ]]; then
+        echo "[deploy] preflight DATABASE_URL…"
+        bash "${SCRIPT_DIR}/forge-db-check.sh" --cluster "$CLUSTER"
+    fi
+}
+
+prepare_service_start() {
+    stop_cluster
+}
+
 probe_health() {
     local deadline=$((SECONDS + HEALTH_TIMEOUT))
     while (( SECONDS < deadline )); do
@@ -101,10 +135,8 @@ probe_health() {
     return 1
 }
 
-prepare_service_start() {
-    systemctl stop "$SERVICE" 2>/dev/null || true
-    docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
-    systemctl reset-failed "$SERVICE" 2>/dev/null || true
+show_service_logs() {
+    journalctl -u "$SERVICE" -n 40 --no-pager >&2 || true
 }
 
 verify_built_binary() {
@@ -119,6 +151,8 @@ verify_built_binary() {
 }
 
 detect_health_port
+stop_cluster
+warn_port_conflict
 
 if [[ "$ROLLBACK" -eq 1 ]]; then
     if ! docker image inspect "${IMAGE}:previous" >/dev/null 2>&1; then
@@ -126,9 +160,15 @@ if [[ "$ROLLBACK" -eq 1 ]]; then
         exit 65
     fi
     docker tag "${IMAGE}:previous" "${IMAGE}:current"
+    preflight_database
     prepare_service_start
     systemctl restart "$SERVICE"
-    probe_health || { echo "[deploy] rollback health failed" >&2; exit 1; }
+    probe_health || {
+        show_service_logs
+        echo "[deploy] rollback health failed" >&2
+        stop_cluster
+        exit 1
+    }
     echo "[deploy] rolled back ${SERVICE} to :previous"
     exit 0
 fi
@@ -161,6 +201,7 @@ if docker image inspect "${IMAGE}:current" >/dev/null 2>&1; then
     docker tag "${IMAGE}:current" "${IMAGE}:previous"
 fi
 docker tag "${IMAGE_SHA}" "${IMAGE}:current"
+preflight_database
 prepare_service_start
 systemctl restart "$SERVICE"
 echo "[deploy] probing /health on port ${HEALTH_PORT}…"
@@ -171,11 +212,16 @@ if probe_health; then
 fi
 
 echo "[deploy] health check failed; rolling back…" >&2
+show_service_logs
 if docker image inspect "${IMAGE}:previous" >/dev/null 2>&1; then
     docker tag "${IMAGE}:previous" "${IMAGE}:current"
     prepare_service_start
     systemctl restart "$SERVICE"
-    probe_health && exit 1
+    if probe_health; then
+        echo "[deploy] rolled back to :previous (new image failed health)" >&2
+        exit 1
+    fi
 fi
-journalctl -u "$SERVICE" -n 40 --no-pager >&2 || true
+stop_cluster
+show_service_logs
 exit 2

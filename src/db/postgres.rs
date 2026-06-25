@@ -1,14 +1,16 @@
 use std::time::Duration;
 
 use deadpool_postgres::{Config, Pool, PoolConfig, Runtime};
-use native_tls::TlsConnector;
-use postgres_native_tls::MakeTlsConnector;
+use rustls::{ClientConfig, RootCertStore};
 use tokio_postgres::{NoTls, Row};
+use tokio_postgres_rustls::MakeRustlsConnect;
 use uuid::Uuid;
+use webpki_roots::TLS_SERVER_ROOTS;
 
 use super::{LeaderboardListingRow, LeaderboardWalletRow, ListingRow, PaymentRow, SaleRow};
-use crate::db::listing_filters::search_like_pattern;
+use crate::db::listing_filters::{listing_filter_suffix, ListingFilterBinds};
 use crate::error::{AppError, AppResult};
+use tokio_postgres::types::ToSql;
 
 const SCHEMA: &str = include_str!("../../migrations/postgres/001_init.sql");
 
@@ -19,7 +21,27 @@ fn uses_tls(database_url: &str) -> bool {
         || lower.contains("sslmode=verify-ca")
 }
 
+fn validate_database_url(database_url: &str) -> AppResult<()> {
+    let lower = database_url.to_ascii_lowercase();
+    if lower.contains("supabase.co") && !uses_tls(database_url) {
+        return Err(AppError::Internal(anyhow::anyhow!(
+            "Supabase DATABASE_URL must include ?sslmode=require (or verify-full)"
+        )));
+    }
+    Ok(())
+}
+
+fn make_rustls_connector() -> AppResult<MakeRustlsConnect> {
+    let mut roots = RootCertStore::empty();
+    roots.extend(TLS_SERVER_ROOTS.iter().cloned());
+    let config = ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Ok(MakeRustlsConnect::new(config))
+}
+
 pub fn connect_pool(database_url: &str) -> AppResult<Pool> {
+    validate_database_url(database_url)?;
     let mut cfg = Config::new();
     cfg.url = Some(database_url.to_string());
     cfg.pool = Some(PoolConfig {
@@ -30,10 +52,7 @@ pub fn connect_pool(database_url: &str) -> AppResult<Pool> {
         ..PoolConfig::default()
     });
     let pool = if uses_tls(database_url) {
-        let connector = TlsConnector::builder()
-            .build()
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("postgres tls: {e}")))?;
-        let tls = MakeTlsConnector::new(connector);
+        let tls = make_rustls_connector()?;
         cfg.create_pool(Some(Runtime::Tokio1), tls)
     } else {
         cfg.create_pool(Some(Runtime::Tokio1), NoTls)
@@ -45,7 +64,9 @@ pub async fn migrate(pool: &Pool) -> AppResult<()> {
     let client = pool
         .get()
         .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("postgres conn: {e}")))?;
+        .map_err(|e| AppError::Internal(anyhow::anyhow!(
+            "postgres conn: {e} (check DATABASE_URL, URL-encoded password, Session pooler + ?sslmode=require, Supabase IP allowlist)"
+        )))?;
     client
         .batch_execute(SCHEMA)
         .await
@@ -119,74 +140,37 @@ pub async fn get_listing(pool: &Pool, id: Uuid) -> AppResult<ListingRow> {
     Ok(map_listing(&row))
 }
 
-pub async fn count_listings(
-    pool: &Pool,
-    category: Option<&str>,
-    agent_friendly: Option<bool>,
-    search: Option<&str>,
-) -> AppResult<i64> {
-    let search_pat = search.map(search_like_pattern);
+pub async fn count_listings(pool: &Pool, binds: &ListingFilterBinds) -> AppResult<i64> {
+    let (suffix, _) = listing_filter_suffix(binds, 1, false);
+    let sql = format!("SELECT COUNT(*) FROM listings WHERE status = 'active'{suffix}");
+    let mut params: Vec<&(dyn ToSql + Sync)> = Vec::new();
+    if let Some(ref c) = binds.category {
+        params.push(c);
+    }
+    if let Some(af) = binds.agent_friendly.as_ref() {
+        params.push(af);
+    }
+    if let Some(ref w) = binds.seller_wallet {
+        params.push(w);
+    }
+    if let Some(ref p) = binds.search_pattern {
+        params.push(p);
+    }
     let client = pool
         .get()
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("postgres conn: {e}")))?;
-    let count: i64 = match (category, agent_friendly, search_pat.as_deref()) {
-        (Some(cat), Some(af), Some(pat)) => client
-            .query_one(
-                "SELECT COUNT(*) FROM listings WHERE status = 'active' AND category = $1 AND agent_friendly = $2 AND (title ILIKE $3 OR description ILIKE $3)",
-                &[&cat, &af, &pat],
-            )
-            .await,
-        (Some(cat), Some(af), None) => client
-            .query_one(
-                "SELECT COUNT(*) FROM listings WHERE status = 'active' AND category = $1 AND agent_friendly = $2",
-                &[&cat, &af],
-            )
-            .await,
-        (Some(cat), None, Some(pat)) => client
-            .query_one(
-                "SELECT COUNT(*) FROM listings WHERE status = 'active' AND category = $1 AND (title ILIKE $2 OR description ILIKE $2)",
-                &[&cat, &pat],
-            )
-            .await,
-        (Some(cat), None, None) => client
-            .query_one(
-                "SELECT COUNT(*) FROM listings WHERE status = 'active' AND category = $1",
-                &[&cat],
-            )
-            .await,
-        (None, Some(af), Some(pat)) => client
-            .query_one(
-                "SELECT COUNT(*) FROM listings WHERE status = 'active' AND agent_friendly = $1 AND (title ILIKE $2 OR description ILIKE $2)",
-                &[&af, &pat],
-            )
-            .await,
-        (None, Some(af), None) => client
-            .query_one(
-                "SELECT COUNT(*) FROM listings WHERE status = 'active' AND agent_friendly = $1",
-                &[&af],
-            )
-            .await,
-        (None, None, Some(pat)) => client
-            .query_one(
-                "SELECT COUNT(*) FROM listings WHERE status = 'active' AND (title ILIKE $1 OR description ILIKE $1)",
-                &[&pat],
-            )
-            .await,
-        (None, None, None) => client
-            .query_one("SELECT COUNT(*) FROM listings WHERE status = 'active'", &[])
-            .await,
-    }
-    .map_err(|e| AppError::Internal(anyhow::anyhow!("count listings: {e}")))?
-    .get(0);
+    let count: i64 = client
+        .query_one(&sql, &params)
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("count listings: {e}")))?
+        .get(0);
     Ok(count)
 }
 
 pub async fn list_listings(
     pool: &Pool,
-    category: Option<&str>,
-    agent_friendly: Option<bool>,
-    search: Option<&str>,
+    binds: &ListingFilterBinds,
     sort: &str,
     limit: i64,
     offset: i64,
@@ -196,63 +180,34 @@ pub async fn list_listings(
         "price_desc" => "price_micro_usdc DESC, created_at DESC",
         _ => "created_at DESC",
     };
-    let search_pat = search.map(search_like_pattern);
+    let (suffix, next_idx) = listing_filter_suffix(binds, 1, false);
+    let sql = format!(
+        "SELECT * FROM listings WHERE status = 'active'{suffix} ORDER BY {order} LIMIT ${next_idx} OFFSET ${}",
+        next_idx + 1
+    );
+    let mut params: Vec<&(dyn ToSql + Sync)> = Vec::new();
+    if let Some(ref c) = binds.category {
+        params.push(c);
+    }
+    if let Some(af) = binds.agent_friendly.as_ref() {
+        params.push(af);
+    }
+    if let Some(ref w) = binds.seller_wallet {
+        params.push(w);
+    }
+    if let Some(ref p) = binds.search_pattern {
+        params.push(p);
+    }
+    params.push(&limit);
+    params.push(&offset);
     let client = pool
         .get()
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("postgres conn: {e}")))?;
-
-    let rows = match (category, agent_friendly, search_pat.as_deref()) {
-        (Some(cat), Some(af), Some(pat)) => {
-            let sql = format!(
-                "SELECT * FROM listings WHERE status = 'active' AND category = $1 AND agent_friendly = $2 AND (title ILIKE $3 OR description ILIKE $3) ORDER BY {order} LIMIT $4 OFFSET $5"
-            );
-            client.query(&sql, &[&cat, &af, &pat, &limit, &offset]).await
-        }
-        (Some(cat), Some(af), None) => {
-            let sql = format!(
-                "SELECT * FROM listings WHERE status = 'active' AND category = $1 AND agent_friendly = $2 ORDER BY {order} LIMIT $3 OFFSET $4"
-            );
-            client.query(&sql, &[&cat, &af, &limit, &offset]).await
-        }
-        (Some(cat), None, Some(pat)) => {
-            let sql = format!(
-                "SELECT * FROM listings WHERE status = 'active' AND category = $1 AND (title ILIKE $2 OR description ILIKE $2) ORDER BY {order} LIMIT $3 OFFSET $4"
-            );
-            client.query(&sql, &[&cat, &pat, &limit, &offset]).await
-        }
-        (Some(cat), None, None) => {
-            let sql = format!(
-                "SELECT * FROM listings WHERE status = 'active' AND category = $1 ORDER BY {order} LIMIT $2 OFFSET $3"
-            );
-            client.query(&sql, &[&cat, &limit, &offset]).await
-        }
-        (None, Some(af), Some(pat)) => {
-            let sql = format!(
-                "SELECT * FROM listings WHERE status = 'active' AND agent_friendly = $1 AND (title ILIKE $2 OR description ILIKE $2) ORDER BY {order} LIMIT $3 OFFSET $4"
-            );
-            client.query(&sql, &[&af, &pat, &limit, &offset]).await
-        }
-        (None, Some(af), None) => {
-            let sql = format!(
-                "SELECT * FROM listings WHERE status = 'active' AND agent_friendly = $1 ORDER BY {order} LIMIT $2 OFFSET $3"
-            );
-            client.query(&sql, &[&af, &limit, &offset]).await
-        }
-        (None, None, Some(pat)) => {
-            let sql = format!(
-                "SELECT * FROM listings WHERE status = 'active' AND (title ILIKE $1 OR description ILIKE $1) ORDER BY {order} LIMIT $2 OFFSET $3"
-            );
-            client.query(&sql, &[&pat, &limit, &offset]).await
-        }
-        (None, None, None) => {
-            let sql = format!(
-                "SELECT * FROM listings WHERE status = 'active' ORDER BY {order} LIMIT $1 OFFSET $2"
-            );
-            client.query(&sql, &[&limit, &offset]).await
-        }
-    }
-    .map_err(|e| AppError::Internal(anyhow::anyhow!("list listings: {e}")))?;
+    let rows = client
+        .query(&sql, &params)
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("list listings: {e}")))?;
 
     Ok(rows.iter().map(map_listing).collect())
 }

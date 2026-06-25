@@ -6,7 +6,7 @@ use rusqlite::{params, Row};
 use uuid::Uuid;
 
 use super::{LeaderboardListingRow, LeaderboardWalletRow, ListingRow, PaymentRow, SaleRow};
-use crate::db::listing_filters::search_like_pattern;
+use crate::db::listing_filters::{listing_filter_suffix, ListingFilterBinds};
 use crate::error::{AppError, AppResult};
 
 const SCHEMA: &str = include_str!("../../migrations/sqlite/001_init.sql");
@@ -155,64 +155,42 @@ pub async fn get_listing(pool: &Pool, id: Uuid) -> AppResult<ListingRow> {
         .ok_or(AppError::NotFound)
 }
 
-pub async fn count_listings(
-    pool: &Pool,
-    category: Option<&str>,
-    agent_friendly: Option<bool>,
-    search: Option<&str>,
-) -> AppResult<i64> {
-    let category = category.map(str::to_string);
-    let search_pat = search.map(search_like_pattern);
+fn listing_filter_values(
+    binds: &ListingFilterBinds,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> Vec<rusqlite::types::Value> {
+    let mut values = Vec::new();
+    if let Some(ref c) = binds.category {
+        values.push(c.clone().into());
+    }
+    if let Some(af) = binds.agent_friendly {
+        values.push(i32::from(af).into());
+    }
+    if let Some(ref w) = binds.seller_wallet {
+        values.push(w.clone().into());
+    }
+    if let Some(ref p) = binds.search_pattern {
+        values.push(p.clone().into());
+    }
+    if let Some(l) = limit {
+        values.push(l.into());
+    }
+    if let Some(o) = offset {
+        values.push(o.into());
+    }
+    values
+}
+
+pub async fn count_listings(pool: &Pool, binds: &ListingFilterBinds) -> AppResult<i64> {
+    let (suffix, _) = listing_filter_suffix(binds, 1, true);
+    let sql = format!("SELECT COUNT(*) FROM listings WHERE status = 'active'{suffix}");
+    let values = listing_filter_values(binds, None, None);
     pool.get()
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite conn: {e}")))?
         .interact(move |conn| -> rusqlite::Result<i64> {
-            match (
-                category.as_deref(),
-                agent_friendly,
-                search_pat.as_deref(),
-            ) {
-                (Some(cat), Some(af), Some(pat)) => conn.query_row(
-                    "SELECT COUNT(*) FROM listings WHERE status = 'active' AND category = ?1 AND agent_friendly = ?2 AND (title LIKE ?3 ESCAPE '\\' OR description LIKE ?3 ESCAPE '\\')",
-                    params![cat, i32::from(af), pat],
-                    |row| row.get(0),
-                ),
-                (Some(cat), Some(af), None) => conn.query_row(
-                    "SELECT COUNT(*) FROM listings WHERE status = 'active' AND category = ?1 AND agent_friendly = ?2",
-                    params![cat, i32::from(af)],
-                    |row| row.get(0),
-                ),
-                (Some(cat), None, Some(pat)) => conn.query_row(
-                    "SELECT COUNT(*) FROM listings WHERE status = 'active' AND category = ?1 AND (title LIKE ?2 ESCAPE '\\' OR description LIKE ?2 ESCAPE '\\')",
-                    params![cat, pat],
-                    |row| row.get(0),
-                ),
-                (Some(cat), None, None) => conn.query_row(
-                    "SELECT COUNT(*) FROM listings WHERE status = 'active' AND category = ?1",
-                    params![cat],
-                    |row| row.get(0),
-                ),
-                (None, Some(af), Some(pat)) => conn.query_row(
-                    "SELECT COUNT(*) FROM listings WHERE status = 'active' AND agent_friendly = ?1 AND (title LIKE ?2 ESCAPE '\\' OR description LIKE ?2 ESCAPE '\\')",
-                    params![i32::from(af), pat],
-                    |row| row.get(0),
-                ),
-                (None, Some(af), None) => conn.query_row(
-                    "SELECT COUNT(*) FROM listings WHERE status = 'active' AND agent_friendly = ?1",
-                    params![i32::from(af)],
-                    |row| row.get(0),
-                ),
-                (None, None, Some(pat)) => conn.query_row(
-                    "SELECT COUNT(*) FROM listings WHERE status = 'active' AND (title LIKE ?1 ESCAPE '\\' OR description LIKE ?1 ESCAPE '\\')",
-                    params![pat],
-                    |row| row.get(0),
-                ),
-                (None, None, None) => conn.query_row(
-                    "SELECT COUNT(*) FROM listings WHERE status = 'active'",
-                    [],
-                    |row| row.get(0),
-                ),
-            }
+            conn.query_row(&sql, rusqlite::params_from_iter(values), |row| row.get(0))
         })
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite interact: {e}")))?
@@ -221,113 +199,34 @@ pub async fn count_listings(
 
 pub async fn list_listings(
     pool: &Pool,
-    category: Option<&str>,
-    agent_friendly: Option<bool>,
-    search: Option<&str>,
+    binds: &ListingFilterBinds,
     sort: &str,
     limit: i64,
     offset: i64,
 ) -> AppResult<Vec<ListingRow>> {
-    let category = category.map(str::to_string);
-    let search_pat = search.map(search_like_pattern);
     let sort = sort.to_string();
+    let (suffix, next_idx) = listing_filter_suffix(binds, 1, true);
+    let order = match sort.as_str() {
+        "price_asc" => "price_micro_usdc ASC, created_at DESC",
+        "price_desc" => "price_micro_usdc DESC, created_at DESC",
+        _ => "created_at DESC",
+    };
+    let select = "SELECT id, seller_wallet, display_name, title, description, category,
+                        price_micro_usdc, preview_key, asset_key, content_type, byte_size,
+                        agent_friendly, delivery_scheme, status, created_at
+                 FROM listings";
+    let sql = format!(
+        "{select} WHERE status = 'active'{suffix} ORDER BY {order} LIMIT ?{next_idx} OFFSET ?{}",
+        next_idx + 1
+    );
+    let values = listing_filter_values(binds, Some(limit), Some(offset));
     pool.get()
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite conn: {e}")))?
         .interact(move |conn| -> rusqlite::Result<Vec<ListingRow>> {
-            let order = match sort.as_str() {
-                "price_asc" => "price_micro_usdc ASC, created_at DESC",
-                "price_desc" => "price_micro_usdc DESC, created_at DESC",
-                _ => "created_at DESC",
-            };
-            let select = "SELECT id, seller_wallet, display_name, title, description, category,
-                            price_micro_usdc, preview_key, asset_key, content_type, byte_size,
-                            agent_friendly, delivery_scheme, status, created_at
-                     FROM listings";
-            match (
-                category.as_deref(),
-                agent_friendly,
-                search_pat.as_deref(),
-            ) {
-                (Some(cat), Some(af), Some(pat)) => {
-                    let sql = format!(
-                        "{select} WHERE status = 'active' AND category = ?1 AND agent_friendly = ?2 \
-                         AND (title LIKE ?3 ESCAPE '\\' OR description LIKE ?3 ESCAPE '\\') \
-                         ORDER BY {order} LIMIT ?4 OFFSET ?5"
-                    );
-                    let mut stmt = conn.prepare(&sql)?;
-                    let rows = stmt.query_map(
-                        params![cat, i32::from(af), pat, limit, offset],
-                        map_listing,
-                    )?;
-                    rows.collect()
-                }
-                (Some(cat), Some(af), None) => {
-                    let sql = format!(
-                        "{select} WHERE status = 'active' AND category = ?1 AND agent_friendly = ?2
-                         ORDER BY {order} LIMIT ?3 OFFSET ?4"
-                    );
-                    let mut stmt = conn.prepare(&sql)?;
-                    let rows = stmt.query_map(params![cat, i32::from(af), limit, offset], map_listing)?;
-                    rows.collect()
-                }
-                (Some(cat), None, Some(pat)) => {
-                    let sql = format!(
-                        "{select} WHERE status = 'active' AND category = ?1 \
-                         AND (title LIKE ?2 ESCAPE '\\' OR description LIKE ?2 ESCAPE '\\') \
-                         ORDER BY {order} LIMIT ?3 OFFSET ?4"
-                    );
-                    let mut stmt = conn.prepare(&sql)?;
-                    let rows = stmt.query_map(params![cat, pat, limit, offset], map_listing)?;
-                    rows.collect()
-                }
-                (Some(cat), None, None) => {
-                    let sql = format!(
-                        "{select} WHERE status = 'active' AND category = ?1
-                         ORDER BY {order} LIMIT ?2 OFFSET ?3"
-                    );
-                    let mut stmt = conn.prepare(&sql)?;
-                    let rows = stmt.query_map(params![cat, limit, offset], map_listing)?;
-                    rows.collect()
-                }
-                (None, Some(af), Some(pat)) => {
-                    let sql = format!(
-                        "{select} WHERE status = 'active' AND agent_friendly = ?1 \
-                         AND (title LIKE ?2 ESCAPE '\\' OR description LIKE ?2 ESCAPE '\\') \
-                         ORDER BY {order} LIMIT ?3 OFFSET ?4"
-                    );
-                    let mut stmt = conn.prepare(&sql)?;
-                    let rows = stmt.query_map(params![i32::from(af), pat, limit, offset], map_listing)?;
-                    rows.collect()
-                }
-                (None, Some(af), None) => {
-                    let sql = format!(
-                        "{select} WHERE status = 'active' AND agent_friendly = ?1
-                         ORDER BY {order} LIMIT ?2 OFFSET ?3"
-                    );
-                    let mut stmt = conn.prepare(&sql)?;
-                    let rows = stmt.query_map(params![i32::from(af), limit, offset], map_listing)?;
-                    rows.collect()
-                }
-                (None, None, Some(pat)) => {
-                    let sql = format!(
-                        "{select} WHERE status = 'active' \
-                         AND (title LIKE ?1 ESCAPE '\\' OR description LIKE ?1 ESCAPE '\\') \
-                         ORDER BY {order} LIMIT ?2 OFFSET ?3"
-                    );
-                    let mut stmt = conn.prepare(&sql)?;
-                    let rows = stmt.query_map(params![pat, limit, offset], map_listing)?;
-                    rows.collect()
-                }
-                (None, None, None) => {
-                    let sql = format!(
-                        "{select} WHERE status = 'active' ORDER BY {order} LIMIT ?1 OFFSET ?2"
-                    );
-                    let mut stmt = conn.prepare(&sql)?;
-                    let rows = stmt.query_map(params![limit, offset], map_listing)?;
-                    rows.collect()
-                }
-            }
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(values), map_listing)?;
+            rows.collect()
         })
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite interact: {e}")))?

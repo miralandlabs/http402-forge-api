@@ -6,7 +6,7 @@ mod sales;
 mod sqlite;
 
 pub use listing::ListingRow;
-pub use listing_filters::normalize_search;
+pub use listing_filters::{normalize_search, ListingFilterBinds};
 pub use payment::PaymentRow;
 pub use sales::{LeaderboardListingRow, LeaderboardWalletRow, SaleRow};
 
@@ -98,39 +98,26 @@ impl Database {
         }
     }
 
-    pub async fn count_listings(
-        &self,
-        category: Option<&str>,
-        agent_friendly: Option<bool>,
-        search: Option<&str>,
-    ) -> AppResult<i64> {
+    pub async fn count_listings(&self, filters: &ListingFilterBinds) -> AppResult<i64> {
         match &self.backend {
-            DbBackend::Postgres(pool) => {
-                postgres::count_listings(pool, category, agent_friendly, search).await
-            }
-            DbBackend::Sqlite(pool) => {
-                sqlite::count_listings(pool, category, agent_friendly, search).await
-            }
+            DbBackend::Postgres(pool) => postgres::count_listings(pool, filters).await,
+            DbBackend::Sqlite(pool) => sqlite::count_listings(pool, filters).await,
         }
     }
 
     pub async fn list_listings(
         &self,
-        category: Option<&str>,
-        agent_friendly: Option<bool>,
-        search: Option<&str>,
+        filters: &ListingFilterBinds,
         sort: &str,
         limit: i64,
         offset: i64,
     ) -> AppResult<Vec<ListingRow>> {
         match &self.backend {
             DbBackend::Postgres(pool) => {
-                postgres::list_listings(pool, category, agent_friendly, search, sort, limit, offset)
-                    .await
+                postgres::list_listings(pool, filters, sort, limit, offset).await
             }
             DbBackend::Sqlite(pool) => {
-                sqlite::list_listings(pool, category, agent_friendly, search, sort, limit, offset)
-                    .await
+                sqlite::list_listings(pool, filters, sort, limit, offset).await
             }
         }
     }

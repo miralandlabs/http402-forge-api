@@ -65,6 +65,7 @@ Optional: `FORGE_VPS_REPO_PATH` (default `/opt/src/http402-forge-api`)
 |------|------|
 | `Dockerfile` | Rust build + runtime (`ffmpeg`, `poppler-utils`) |
 | `forge-install.sh` | Host bootstrap (Docker, dirs, systemd) |
+| `forge-db-check.sh` | Pre-deploy DATABASE_URL / TCP probe |
 | `forge-deploy.sh` | Build, tag `:current`, restart, health probe, rollback |
 | `forge-nginx-setup.sh` | TLS reverse proxy for both API hostnames |
 | `forge-{devnet,mainnet}.service` | systemd units |
@@ -72,9 +73,38 @@ Optional: `FORGE_VPS_REPO_PATH` (default `/opt/src/http402-forge-api`)
 
 ## Database
 
-Production mainnet should use **Supabase Postgres** (`DATABASE_URL=postgresql://...?sslmode=require`).
+The Docker image does **not** ship `psql` or `sqlite3` CLI tools. Both backends are compiled into the Rust binary:
 
-Preview devnet can use Supabase or embedded SQLite under `/var/lib/forge/devnet/data`.
+| Backend | Driver | When chosen |
+|---------|--------|-------------|
+| **SQLite** | `rusqlite` (bundled) | `DATABASE_URL=sqlite:/app/data/forge.db` |
+| **PostgreSQL** | `tokio-postgres` + TLS (`native-tls`, `ca-certificates` in image) | any other `DATABASE_URL` prefix |
+
+Migrations run automatically on container start (`migrations/postgres/` or `migrations/sqlite/`).
+
+### Supabase on the VPS
+
+Use the **Direct connection** string (port **5432**, `db.<project>.supabase.co`) with TLS:
+
+```env
+DATABASE_URL=postgresql://postgres.[PROJECT_REF]:[PASSWORD]@db.[PROJECT_REF].supabase.co:5432/postgres?sslmode=require
+```
+
+**Required:** `?sslmode=require` — without it the app uses plain TCP and Supabase rejects the connection (`postgres conn: error connecting to server`).
+
+**Checklist if deploy health fails on Postgres:**
+
+1. **Network allowlist** — Supabase dashboard → Database → Network → add your VPS **public IPv4**
+2. **IPv4** — Direct host may be IPv6-only; if `nc -zv db….supabase.co 5432` fails, use **Session pooler** (port 5432 on `*.pooler.supabase.com`) or enable Supabase IPv4 add-on
+3. **Password** — URL-encode special characters in the connection string
+4. **Probe before deploy:**
+   ```bash
+   sudo bash scripts/docker/forge-db-check.sh --cluster devnet
+   ```
+
+Preview devnet can stay on SQLite (default in `forge-devnet.env.example`) — no Supabase required until you opt in.
+
+Production mainnet should use Supabase Postgres (same `sslmode=require` rule).
 
 ## Seller vault gate
 

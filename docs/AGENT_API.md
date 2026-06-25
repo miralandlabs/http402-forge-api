@@ -11,7 +11,7 @@ Base URL: `https://api.http402.trade` (or your deployed `SELLER_PUBLIC_BASE_URL`
 Forge is a **catalog + 402 checkout** service. OpenAPI describes API *shape*; the **product inventory** lives in `GET /api/v1/listings`.
 
 ```text
-1. Search catalog   GET /api/v1/listings?q=…&category=…&agent_friendly=true
+1. Search catalog   GET /api/v1/listings?q=…&seller_wallet=…&category=…&agent_friendly=true
 2. Inspect listing  GET /api/v1/listings/{id}
 3. Sample (free)    GET /api/v1/listings/{id}/preview
 4. Purchase         GET /api/v1/listings/{id}/download  → 402 → sign → retry
@@ -34,12 +34,13 @@ First request returns **402** with `accepts[]`. Build and sign via pr402, then r
 ## List listings
 
 ```http
-GET /api/v1/listings?q=cyberpunk&category=art&agent_friendly=true&sort=newest&limit=20&offset=0
+GET /api/v1/listings?q=cyberpunk&seller_wallet=AbC…&category=art&agent_friendly=true&sort=newest&limit=20&offset=0
 ```
 
 | Param | Notes |
 |-------|--------|
 | `q` | Optional. Matches **title** or **description** (case-insensitive, max 80 chars). |
+| `seller_wallet` | Optional. Exact match on seller pubkey (base58). Combine with `q` to search within one seller's catalog. |
 | `category` | `art`, `text`, `audio`, `video`, `prompt_pack` |
 | `agent_friendly` | `true` / `false` |
 | `sort` | `newest` (default), `price_asc`, `price_desc` |
