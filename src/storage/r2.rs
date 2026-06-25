@@ -113,7 +113,7 @@ impl ObjectStore for R2Storage {
         }
         let stream = response
             .bytes_stream()
-            .map(|chunk| chunk.map_err(|e| std::io::Error::other(e)));
+            .map(|chunk| chunk.map_err(std::io::Error::other));
         Ok((Box::pin(stream), content_type))
     }
 }

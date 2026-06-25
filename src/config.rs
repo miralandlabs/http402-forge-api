@@ -157,19 +157,13 @@ impl AppConfig {
             skip_seller_vault_check: match std::env::var("SKIP_SELLER_VAULT_CHECK") {
                 Ok(v) if v == "1" || v.eq_ignore_ascii_case("true") => true,
                 Ok(v) if v == "0" || v.eq_ignore_ascii_case("false") => false,
-                Ok(v) => {
-                    return Err(format!(
-                        "SKIP_SELLER_VAULT_CHECK must be 0 or 1; got '{v}'"
-                    ))
-                }
+                Ok(v) => return Err(format!("SKIP_SELLER_VAULT_CHECK must be 0 or 1; got '{v}'")),
                 Err(_) => false,
             },
             skip_seller_auth: match std::env::var("SKIP_SELLER_AUTH") {
                 Ok(v) if v == "1" || v.eq_ignore_ascii_case("true") => true,
                 Ok(v) if v == "0" || v.eq_ignore_ascii_case("false") => false,
-                Ok(v) => {
-                    return Err(format!("SKIP_SELLER_AUTH must be 0 or 1; got '{v}'"))
-                }
+                Ok(v) => return Err(format!("SKIP_SELLER_AUTH must be 0 or 1; got '{v}'")),
                 Err(_) => false,
             },
             cors_allowed_origins: parse_cors_origins(cluster),

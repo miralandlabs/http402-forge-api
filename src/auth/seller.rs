@@ -120,7 +120,9 @@ fn solana_off_chain_message(message: &[u8]) -> Vec<u8> {
 
 fn parse_challenge_id(message: &str) -> Option<String> {
     message.lines().find_map(|line| {
-        line.strip_prefix("challenge:").map(str::trim).map(str::to_string)
+        line.strip_prefix("challenge:")
+            .map(str::trim)
+            .map(str::to_string)
     })
 }
 
@@ -137,11 +139,7 @@ fn validate_wallet_pubkey(wallet: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn verify_ed25519_signature(
-    wallet: &str,
-    message: &[u8],
-    signature_b64: &str,
-) -> AppResult<()> {
+fn verify_ed25519_signature(wallet: &str, message: &[u8], signature_b64: &str) -> AppResult<()> {
     let pubkey_bytes = bs58::decode(wallet)
         .into_vec()
         .map_err(|_| AppError::Forbidden("invalid seller_wallet".into()))?;

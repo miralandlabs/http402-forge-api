@@ -126,10 +126,7 @@ pub async fn preview(
         .into_response())
 }
 
-async fn load_preview_content(
-    state: &SharedState,
-    row: &ListingRow,
-) -> AppResult<(Bytes, String)> {
+async fn load_preview_content(state: &SharedState, row: &ListingRow) -> AppResult<(Bytes, String)> {
     let (mut bytes, mut content_type) = state.storage.get(&row.preview_key).await?;
     let is_legacy_placeholder = content_type.starts_with("text/")
         && bytes.starts_with(b"Preview unavailable for")
@@ -137,8 +134,8 @@ async fn load_preview_content(
     if is_legacy_placeholder {
         (bytes, content_type) = state.storage.get(&row.asset_key).await?;
     }
-    let is_legacy_media_asset = row.preview_key == row.asset_key
-        && preview::is_media_content_type(&row.content_type);
+    let is_legacy_media_asset =
+        row.preview_key == row.asset_key && preview::is_media_content_type(&row.content_type);
     if is_legacy_media_asset {
         tracing::warn!(
             listing_id = %row.id,
@@ -249,21 +246,17 @@ pub async fn create(
     let mut preview_bytes: Option<(String, Bytes)> = None;
     let mut vault_checked = state.config.skip_seller_vault_check;
 
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|e| {
-            let msg = e.to_string();
-            if msg.contains("multipart") || msg.contains("limit") {
-                AppError::BadRequest(format!(
-                    "upload too large or invalid multipart (max asset {} bytes, preview {} bytes)",
-                    state.config.max_asset_bytes, state.config.max_preview_bytes
-                ))
-            } else {
-                AppError::BadRequest(msg)
-            }
-        })?
-    {
+    while let Some(field) = multipart.next_field().await.map_err(|e| {
+        let msg = e.to_string();
+        if msg.contains("multipart") || msg.contains("limit") {
+            AppError::BadRequest(format!(
+                "upload too large or invalid multipart (max asset {} bytes, preview {} bytes)",
+                state.config.max_asset_bytes, state.config.max_preview_bytes
+            ))
+        } else {
+            AppError::BadRequest(msg)
+        }
+    })? {
         let name = field.name().unwrap_or("").to_string();
         if (name == "asset" || name == "preview")
             && !vault_checked
@@ -275,7 +268,8 @@ pub async fn create(
             ));
         }
         if (name == "asset" || name == "preview") && !vault_checked {
-            validate_wallet(&seller_wallet).map_err(|m| AppError::validation("seller_wallet", m))?;
+            validate_wallet(&seller_wallet)
+                .map_err(|m| AppError::validation("seller_wallet", m))?;
             require_seller_vault(&state, &seller_wallet).await?;
             vault_checked = true;
         }
@@ -333,7 +327,8 @@ pub async fn create(
             _ => {}
         }
         if name == "seller_wallet" && !seller_wallet.trim().is_empty() && !vault_checked {
-            validate_wallet(&seller_wallet).map_err(|m| AppError::validation("seller_wallet", m))?;
+            validate_wallet(&seller_wallet)
+                .map_err(|m| AppError::validation("seller_wallet", m))?;
             require_seller_vault(&state, &seller_wallet).await?;
             vault_checked = true;
         }
@@ -401,8 +396,7 @@ pub async fn create(
             .await?;
         (key, "image/jpeg".to_string())
     } else if asset_ct.starts_with("video/") || asset_ct.starts_with("audio/") {
-        let (clip, clip_ct) =
-            generate_media_clip(&asset_data, &asset_ct, &state.config).await?;
+        let (clip, clip_ct) = generate_media_clip(&asset_data, &asset_ct, &state.config).await?;
         let ext = clip_extension(&clip_ct);
         let key = object_key("previews", id, &format!("preview.{ext}"));
         state.storage.put(&key, &clip_ct, clip).await?;

@@ -57,10 +57,7 @@ impl Facilitator {
         &self,
         wallet: &str,
     ) -> Result<serde_json::Value, FacilitatorExtError> {
-        let url = format!(
-            "{}/api/v1/facilitator/sellers/{wallet}/preview",
-            self.base
-        );
+        let url = format!("{}/api/v1/facilitator/sellers/{wallet}/preview", self.base);
         let res = self
             .http
             .get(&url)

@@ -5,7 +5,12 @@ mod listings;
 mod seller;
 mod well_known;
 
-use axum::{extract::DefaultBodyLimit, http::HeaderValue, routing::{get, post}, Router};
+use axum::{
+    extract::DefaultBodyLimit,
+    http::HeaderValue,
+    routing::{get, post},
+    Router,
+};
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
@@ -13,10 +18,7 @@ use tower_http::trace::TraceLayer;
 use crate::state::SharedState;
 
 fn cors_layer(origins: &[String]) -> CorsLayer {
-    let allowed: Vec<HeaderValue> = origins
-        .iter()
-        .filter_map(|o| o.parse().ok())
-        .collect();
+    let allowed: Vec<HeaderValue> = origins.iter().filter_map(|o| o.parse().ok()).collect();
     CorsLayer::new()
         .allow_origin(AllowOrigin::list(allowed))
         .allow_methods(AllowMethods::list([
@@ -37,10 +39,7 @@ pub fn router(state: SharedState) -> Router {
 
     Router::new()
         .route("/health", get(health::health))
-        .route(
-            "/api/v1/seller/challenge",
-            get(seller::challenge),
-        )
+        .route("/api/v1/seller/challenge", get(seller::challenge))
         .route("/api/v1/seller/status", get(seller::status))
         .route("/api/v1/seller/provision-tx", post(seller::provision_tx))
         .route(
