@@ -436,12 +436,25 @@ pub async fn create(
         (key, "text/plain; charset=utf-8".to_string())
     } else if is_pdf_content_type(&asset_ct) {
         let key = object_key("previews", id, "preview.jpg");
-        let preview = generate_pdf_first_page_jpeg(&asset_data, &state.config).await?;
-        state
-            .storage
-            .put(&key, "image/jpeg", preview.clone())
-            .await?;
-        (key, "image/jpeg".to_string())
+        match generate_pdf_first_page_jpeg(&asset_data, &state.config).await {
+            Ok(preview) => {
+                state
+                    .storage
+                    .put(&key, "image/jpeg", preview.clone())
+                    .await?;
+                (key, "image/jpeg".to_string())
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "PDF auto-preview failed; listing will use text placeholder");
+                let placeholder_key = object_key("previews", id, "placeholder.txt");
+                let bytes = Bytes::from(format!("Preview unavailable for {asset_ct}"));
+                state
+                    .storage
+                    .put(&placeholder_key, "text/plain", bytes)
+                    .await?;
+                (placeholder_key, "text/plain".to_string())
+            }
+        }
     } else if asset_ct.starts_with("video/") || asset_ct.starts_with("audio/") {
         let (clip, clip_ct) = generate_media_clip(&asset_data, &asset_ct, &state.config).await?;
         let ext = clip_extension(&clip_ct);
