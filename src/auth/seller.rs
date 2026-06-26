@@ -11,6 +11,7 @@ use crate::error::{AppError, AppResult};
 
 const CHALLENGE_PREFIX: &str = "http402-forge:create-listing:v1";
 const DELIST_CHALLENGE_PREFIX: &str = "http402-forge:delist-listing:v1";
+const FEEDBACK_CHALLENGE_PREFIX: &str = "http402-forge:sale-feedback:v1";
 const CHALLENGE_TTL: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Clone)]
@@ -56,6 +57,30 @@ impl SellerAuth {
         let expires_at = Utc::now() + chrono::Duration::seconds(CHALLENGE_TTL.as_secs() as i64);
         let message = format!(
             "{DELIST_CHALLENGE_PREFIX}\nwallet:{wallet}\nlisting:{listing_id}\nchallenge:{id}\nexpires:{}",
+            expires_at.to_rfc3339()
+        );
+        let stored = StoredChallenge {
+            wallet: wallet.to_string(),
+            message: message.clone(),
+            expires_at,
+        };
+        self.pending
+            .lock()
+            .expect("seller auth lock")
+            .insert(id, stored);
+        Ok((message, expires_at))
+    }
+
+    pub fn issue_feedback_challenge(
+        &self,
+        wallet: &str,
+        sale_id: uuid::Uuid,
+    ) -> AppResult<(String, DateTime<Utc>)> {
+        validate_wallet_pubkey(wallet).map_err(|m| AppError::validation("buyer_wallet", m))?;
+        let id = Uuid::new_v4().to_string();
+        let expires_at = Utc::now() + chrono::Duration::seconds(CHALLENGE_TTL.as_secs() as i64);
+        let message = format!(
+            "{FEEDBACK_CHALLENGE_PREFIX}\nwallet:{wallet}\nsale:{sale_id}\nchallenge:{id}\nexpires:{}",
             expires_at.to_rfc3339()
         );
         let stored = StoredChallenge {
@@ -154,6 +179,14 @@ fn parse_challenge_id(message: &str) -> Option<String> {
 pub fn parse_delist_listing_id(message: &str) -> Option<uuid::Uuid> {
     message.lines().find_map(|line| {
         line.strip_prefix("listing:")
+            .map(str::trim)
+            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+    })
+}
+
+pub fn parse_feedback_sale_id(message: &str) -> Option<uuid::Uuid> {
+    message.lines().find_map(|line| {
+        line.strip_prefix("sale:")
             .map(str::trim)
             .and_then(|s| uuid::Uuid::parse_str(s).ok())
     })

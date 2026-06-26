@@ -147,6 +147,19 @@ The Sell UI calls `GET /api/v1/seller/status` and `POST /api/v1/seller/provision
 
 See [docs/SELLER_GUIDE.md](../docs/SELLER_GUIDE.md).
 
+## Trust & moderation (optional)
+
+Defaults keep behavior unchanged (`MODERATION_PROVIDER=none`). See [docs/AGENT_API.md](../docs/AGENT_API.md) and [docs/openapi.yaml](../docs/openapi.yaml).
+
+| Env | Purpose |
+|-----|---------|
+| `MODERATION_PROVIDER` | `none` (default) or `openai` |
+| `OPENAI_API_KEY` | Required when provider is `openai` |
+| `MODERATION_FAIL_CLOSED` | `1` rejects upload if moderation API is down |
+| `SKIP_BUYER_AUTH` | `1` dev-only bypass for sale feedback signatures |
+
+Migration `004_trust_moderation.sql` adds `sale_feedback`, `blocked_content_hashes`, and listing moderation columns (applied on startup with 001–003).
+
 ## Rollback
 
 ```bash

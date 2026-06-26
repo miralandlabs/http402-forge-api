@@ -27,6 +27,25 @@ components:
         agentFriendly: { type: boolean }
         deliveryScheme: { type: string, enum: [exact, escrow] }
         previewUrl: { type: string, format: uri }
+        previewContentType: { type: string }
+        tags:
+          type: array
+          items: { type: string }
+        license:
+          type: string
+          enum: [personal, commercial]
+          nullable: true
+        contentHash:
+          type: string
+          description: Lowercase SHA-256 hex of asset bytes (server-computed on create)
+        qualityScore:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: Rolled up from purchase-linked sale feedback (omitted when no feedback)
+        verifiedFeedbackCount:
+          type: integer
+          description: Count of sale_feedback rows for this listing (omitted when zero)
         createdAt: { type: string, format: date-time }
     ListResponse:
       type: object
@@ -53,6 +72,40 @@ components:
         seller_signature:
           type: string
           description: Base64 ed25519 signature over seller_challenge
+    SaleFeedbackRequest:
+      type: object
+      required: [buyer_wallet, buyer_challenge, buyer_signature, outcome]
+      properties:
+        buyer_wallet:
+          type: string
+          description: Buyer pubkey on the sale; must match signed challenge
+        buyer_challenge:
+          type: string
+          description: Exact message from GET /api/v1/buyer/feedback-challenge
+        buyer_signature:
+          type: string
+          description: Base64 ed25519 signature over buyer_challenge
+        outcome:
+          type: string
+          enum: [as_described, hash_mismatch, corrupt, misleading, other]
+        score:
+          type: integer
+          minimum: 1
+          maximum: 5
+          nullable: true
+          description: Optional human stars (agents typically omit)
+        note:
+          type: string
+          maxLength: 500
+          nullable: true
+    SaleFeedbackResponse:
+      type: object
+      properties:
+        saleId: { type: string, format: uuid }
+        listingId: { type: string, format: uuid }
+        outcome: { type: string }
+        score: { type: integer, nullable: true }
+        createdAt: { type: string, format: date-time }
     SellerStatus:
       type: object
       properties:
@@ -214,7 +267,12 @@ paths:
           schema: { type: boolean }
         - in: query
           name: sort
-          schema: { type: string, enum: [newest, price_asc, price_desc], default: newest }
+          schema:
+            type: string
+            enum: [trending, newest, price_asc, price_desc, quality]
+            default: trending
+          description: |
+            `quality` orders by average purchase feedback score (listings need ≥2 verified signals).
         - in: query
           name: limit
           schema: { type: integer, default: 20, minimum: 1, maximum: 100 }
@@ -258,6 +316,15 @@ paths:
                   enum: [art, text, audio, video, prompt_pack]
                 price_usdc: { type: string, example: "0.05" }
                 agent_friendly: { type: boolean, default: false }
+                tags:
+                  type: string
+                  description: Comma-separated or JSON array
+                license:
+                  type: string
+                  enum: [personal, commercial]
+                content_hash:
+                  type: string
+                  description: Optional; if sent must equal server SHA-256 of asset
                 asset: { type: string, format: binary }
                 preview: { type: string, format: binary }
       responses:
@@ -266,8 +333,13 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ListingPublic" }
+        "400":
+          description: Content moderation blocked upload
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorBody" }
         "403":
-          description: Invalid signature or seller SplitVault not activated
+          description: Invalid signature, blocked content hash, or seller SplitVault not activated
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorBody" }
@@ -350,8 +422,9 @@ paths:
       summary: Pay-to-download (402 then streamed asset)
       description: |
         Active listings return 402 without PAYMENT-SIGNATURE, then 200 after payment.
-        Removed listings return 404 for new purchases. Buyers with a prior payment
-        proof may retry with the same PAYMENT-SIGNATURE header (idempotency).
+        Successful paid download includes response header **X-Forge-Sale-Id** (sale UUID)
+        for purchase-linked feedback. Removed listings return 404 for new purchases.
+        Buyers with a prior payment proof may retry with the same PAYMENT-SIGNATURE header (idempotency).
       parameters:
         - in: path
           name: id
@@ -369,6 +442,13 @@ paths:
               schema: { $ref: "#/components/schemas/PaymentRequired" }
         "200":
           description: Asset file stream
+          headers:
+            X-Forge-Sale-Id:
+              schema: { type: string, format: uuid }
+              description: Sale row id for POST /api/v1/sales/{id}/feedback
+            PAYMENT-RESPONSE:
+              schema: { type: string }
+              description: Base64 settle proof (first paid download)
         "404":
           description: Listing removed and no prior payment idempotency match
           content:
@@ -378,6 +458,69 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorBody" }
+  /api/v1/buyer/feedback-challenge:
+    get:
+      summary: Issue a one-time challenge for sale feedback
+      parameters:
+        - in: query
+          name: buyer_wallet
+          required: true
+          schema: { type: string }
+        - in: query
+          name: sale_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Challenge message to sign with buyer wallet
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SellerChallenge" }
+        "403":
+          description: Not buyer on this sale
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorBody" }
+        "404":
+          description: Sale not found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorBody" }
+  /api/v1/sales/{id}/feedback:
+    post:
+      summary: Submit purchase-linked feedback (one per sale)
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+          description: Sale id from X-Forge-Sale-Id download header
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SaleFeedbackRequest" }
+      responses:
+        "200":
+          description: Feedback recorded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SaleFeedbackResponse" }
+        "403":
+          description: Invalid signature or not buyer on sale
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorBody" }
+        "409":
+          description: Feedback already submitted for this sale
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorBody" }
+        "422":
+          description: Validation error
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ValidationError" }
   /api/v1/leaderboards:
     get:
       summary: 24h leaderboard aggregates

@@ -3,6 +3,7 @@ mod health;
 mod leaderboards;
 mod listings;
 mod rate_limit;
+mod sale_feedback;
 mod seller;
 mod well_known;
 
@@ -13,7 +14,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
+use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer, ExposeHeaders};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
 
@@ -35,6 +36,10 @@ fn cors_layer(origins: &[String]) -> CorsLayer {
             axum::http::header::CONTENT_TYPE,
             axum::http::header::AUTHORIZATION,
             axum::http::HeaderName::from_static("payment-signature"),
+        ]))
+        .expose_headers(ExposeHeaders::list([
+            axum::http::HeaderName::from_static("x-forge-sale-id"),
+            axum::http::HeaderName::from_static("payment-response"),
         ]))
 }
 
@@ -59,6 +64,10 @@ pub fn router(state: SharedState) -> Router {
             "/api/v1/seller/delist-challenge",
             get(seller::delist_challenge),
         )
+        .route(
+            "/api/v1/buyer/feedback-challenge",
+            get(sale_feedback::feedback_challenge),
+        )
         .route("/api/v1/seller/status", get(seller::status))
         .route("/api/v1/seller/provision-tx", post(seller::provision_tx))
         .merge(limited)
@@ -67,6 +76,10 @@ pub fn router(state: SharedState) -> Router {
             get(listings::get_one).delete(listings::delist),
         )
         .route("/api/v1/leaderboards", get(leaderboards::leaderboards))
+        .route(
+            "/api/v1/sales/{id}/feedback",
+            post(sale_feedback::submit_feedback),
+        )
         .route("/api/v1/events", get(events::sse))
         .route(
             "/.well-known/x402-resources.json",

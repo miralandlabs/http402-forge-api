@@ -13,7 +13,7 @@ Use this checklist before pointing production traffic at `https://api.http402.tr
 
 - [ ] `DATABASE_URL` → Supabase Postgres with `?sslmode=require`
 - [ ] `DATABASE_SSL_ROOT_CERT` → project CA PEM (`/etc/forge/ssl/supabase-prod-ca.crt`)
-- [ ] Run migrations (001 + 002 agent metadata) on production DB
+- [ ] Run migrations (001–004: agent metadata, preview content type, trust/moderation) on production DB
 - [ ] `STORAGE_BACKEND=r2` with production bucket and credentials
 - [ ] Confirm preview streaming works for large video/audio assets (no full-buffer previews)
 
@@ -31,7 +31,17 @@ Use this checklist before pointing production traffic at `https://api.http402.tr
 - [ ] TLS termination (nginx/Caddy) with valid certificate; HSTS enabled
 - [ ] `RATE_LIMIT_RPS` set (default 30; set `0` to disable in-process limiter and rely on nginx)
 - [ ] Optional nginx rate limits on `/api/v1/listings/*/preview` and `/download` per client IP
-- [ ] `SKIP_SELLER_AUTH=0`, `SKIP_SELLER_VAULT_CHECK=0` in production
+- [ ] `SKIP_SELLER_AUTH=0`, `SKIP_SELLER_VAULT_CHECK=0`, `SKIP_BUYER_AUTH=0` in production
+
+## Trust & moderation
+
+- [ ] `contentHash` on listings is server-computed; agents verify SHA-256(bytes) after download (see `AGENT_API.md`)
+- [ ] Paid downloads return `X-Forge-Sale-Id` — required for `POST /api/v1/sales/{id}/feedback`
+- [ ] Optional: enable upload moderation before open uploads scale
+  - [ ] `MODERATION_PROVIDER=openai` + `OPENAI_API_KEY` (or `none` to skip provider scan)
+  - [ ] `MODERATION_FAIL_CLOSED=1` if you want uploads rejected when OpenAI is unreachable
+  - [ ] Populate `blocked_content_hashes` for known-bad asset hashes (manual SQL or admin script)
+- [ ] Terms / prohibited-use policy published on the web app (API moderation alone is not legal compliance)
 
 ## Monitoring
 
@@ -50,4 +60,4 @@ Use this checklist before pointing production traffic at `https://api.http402.tr
 
 - [ ] Update `AGENT_API.md` base URL if changed
 - [ ] Publish forge-mcp server env vars for agent operators
-- [ ] Announce trending sort + agent metadata fields to integrators
+- [ ] Announce `sort=quality`, `qualityScore`, and sale feedback API to integrators

@@ -10,6 +10,7 @@ use uuid::Uuid;
 use webpki_roots::TLS_SERVER_ROOTS;
 
 use super::{LeaderboardListingRow, LeaderboardWalletRow, ListingRow, PaymentRow, SaleRow};
+use super::trust::{ListingQualityStats, SaleFeedbackRow};
 use crate::db::listing_filters::{listing_filter_suffix, ListingFilterBinds};
 use crate::error::{AppError, AppResult};
 use tokio_postgres::types::ToSql;
@@ -17,6 +18,7 @@ use tokio_postgres::types::ToSql;
 const SCHEMA: &str = include_str!("../../migrations/postgres/001_init.sql");
 const SCHEMA_002: &str = include_str!("../../migrations/postgres/002_agent_metadata.sql");
 const SCHEMA_003: &str = include_str!("../../migrations/postgres/003_preview_content_type.sql");
+const SCHEMA_004: &str = include_str!("../../migrations/postgres/004_trust_moderation.sql");
 
 fn is_supabase_host(database_url: &str) -> bool {
     let lower = database_url.to_ascii_lowercase();
@@ -166,6 +168,10 @@ pub async fn migrate(pool: &Pool) -> AppResult<()> {
         .batch_execute(SCHEMA_003)
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("postgres migrate 003: {e}")))?;
+    client
+        .batch_execute(SCHEMA_004)
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("postgres migrate 004: {e}")))?;
     Ok(())
 }
 
@@ -193,8 +199,9 @@ pub async fn insert_listing(pool: &Pool, row: &ListingRow) -> AppResult<()> {
             INSERT INTO listings (
                 id, seller_wallet, display_name, title, description, category,
                 price_micro_usdc, preview_key, preview_content_type, asset_key, content_type, byte_size,
-                agent_friendly, delivery_scheme, status, tags, license, content_hash, created_at
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+                agent_friendly, delivery_scheme, status, tags, license, content_hash,
+                moderation_status, moderation_labels, created_at
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
             "#,
             &[
                 &row.id,
@@ -215,6 +222,8 @@ pub async fn insert_listing(pool: &Pool, row: &ListingRow) -> AppResult<()> {
                 &row.tags,
                 &row.license,
                 &row.content_hash,
+                &row.moderation_status,
+                &row.moderation_labels,
                 &row.created_at,
             ],
         )
@@ -307,6 +316,7 @@ pub async fn list_listings(
         "price_desc" => "price_micro_usdc DESC, created_at DESC",
         "newest" => "created_at DESC",
         "trending" => "(SELECT COUNT(*) FROM sales s WHERE s.listing_id = listings.id AND s.settled_at >= NOW() - INTERVAL '24 hours') DESC, created_at DESC",
+        "quality" => "(SELECT CASE WHEN COUNT(*) >= 2 THEN AVG(CASE sf.outcome WHEN 'as_described' THEN 100 WHEN 'hash_mismatch' THEN 0 WHEN 'corrupt' THEN 25 WHEN 'misleading' THEN 35 ELSE 50 END) ELSE NULL END FROM sale_feedback sf WHERE sf.listing_id = listings.id) DESC NULLS LAST, created_at DESC",
         _ => "(SELECT COUNT(*) FROM sales s WHERE s.listing_id = listings.id AND s.settled_at >= NOW() - INTERVAL '24 hours') DESC, created_at DESC",
     };
     let (suffix, next_idx) = listing_filter_suffix(binds, 1, false);
@@ -485,6 +495,8 @@ fn map_listing(row: &Row) -> ListingRow {
         tags: row.get("tags"),
         license: row.get("license"),
         content_hash: row.get("content_hash"),
+        moderation_status: row.get("moderation_status"),
+        moderation_labels: row.get("moderation_labels"),
         created_at: row.get("created_at"),
     }
 }
@@ -545,4 +557,151 @@ pub async fn set_preview_content_type(
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("set preview content type: {e}")))?;
     Ok(())
+}
+
+pub async fn is_content_hash_blocked(pool: &Pool, content_hash: &str) -> AppResult<bool> {
+    let client = pool
+        .get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("postgres conn: {e}")))?;
+    let row = client
+        .query_opt(
+            "SELECT 1 FROM blocked_content_hashes WHERE content_hash = $1",
+            &[&content_hash],
+        )
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("hash blocklist: {e}")))?;
+    Ok(row.is_some())
+}
+
+pub async fn get_sale(pool: &Pool, sale_id: Uuid) -> AppResult<SaleRow> {
+    let client = pool
+        .get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("postgres conn: {e}")))?;
+    let row = client
+        .query_opt("SELECT * FROM sales WHERE id = $1", &[&sale_id])
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("get sale: {e}")))?
+        .ok_or(AppError::NotFound)?;
+    Ok(map_sale(&row))
+}
+
+pub async fn find_sale_by_payment(
+    pool: &Pool,
+    listing_id: Uuid,
+    buyer_wallet: &str,
+    tx_signature: &str,
+) -> AppResult<Option<SaleRow>> {
+    let client = pool
+        .get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("postgres conn: {e}")))?;
+    let row = client
+        .query_opt(
+            r#"
+            SELECT * FROM sales
+            WHERE listing_id = $1 AND buyer_wallet = $2 AND tx_signature = $3
+            ORDER BY settled_at DESC
+            LIMIT 1
+            "#,
+            &[&listing_id, &buyer_wallet, &tx_signature],
+        )
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("find sale: {e}")))?;
+    Ok(row.as_ref().map(map_sale))
+}
+
+pub async fn insert_sale_feedback(
+    pool: &Pool,
+    sale_id: Uuid,
+    listing_id: Uuid,
+    buyer_wallet: &str,
+    outcome: &str,
+    score: Option<i16>,
+    note: Option<&str>,
+) -> AppResult<SaleFeedbackRow> {
+    let client = pool
+        .get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("postgres conn: {e}")))?;
+    client
+        .execute(
+            r#"
+            INSERT INTO sale_feedback (sale_id, listing_id, buyer_wallet, outcome, score, note)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            "#,
+            &[&sale_id, &listing_id, &buyer_wallet, &outcome, &score, &note],
+        )
+        .await
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("duplicate key") || msg.contains("unique constraint") {
+                AppError::Conflict("feedback already submitted for this sale".into())
+            } else {
+                AppError::Internal(anyhow::anyhow!("insert sale feedback: {e}"))
+            }
+        })?;
+    let row = client
+        .query_one("SELECT * FROM sale_feedback WHERE sale_id = $1", &[&sale_id])
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("fetch sale feedback: {e}")))?;
+    Ok(map_sale_feedback(&row))
+}
+
+pub async fn listing_quality_stats(
+    pool: &Pool,
+    listing_ids: &[Uuid],
+) -> AppResult<std::collections::HashMap<Uuid, ListingQualityStats>> {
+    if listing_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let client = pool
+        .get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("postgres conn: {e}")))?;
+    let rows = client
+        .query(
+            r#"
+            SELECT listing_id,
+                   COUNT(*)::BIGINT AS feedback_count,
+                   AVG(CASE outcome
+                     WHEN 'as_described' THEN 100
+                     WHEN 'hash_mismatch' THEN 0
+                     WHEN 'corrupt' THEN 25
+                     WHEN 'misleading' THEN 35
+                     ELSE 50
+                   END)::INT AS quality_score
+            FROM sale_feedback
+            WHERE listing_id = ANY($1)
+            GROUP BY listing_id
+            "#,
+            &[&listing_ids],
+        )
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("listing quality stats: {e}")))?;
+    Ok(rows
+        .iter()
+        .map(|row| {
+            (
+                row.get("listing_id"),
+                ListingQualityStats {
+                    quality_score: row.get("quality_score"),
+                    verified_feedback_count: row.get("feedback_count"),
+                },
+            )
+        })
+        .collect())
+}
+
+fn map_sale_feedback(row: &Row) -> SaleFeedbackRow {
+    SaleFeedbackRow {
+        sale_id: row.get("sale_id"),
+        listing_id: row.get("listing_id"),
+        buyer_wallet: row.get("buyer_wallet"),
+        outcome: row.get("outcome"),
+        score: row.get("score"),
+        note: row.get("note"),
+        created_at: row.get("created_at"),
+    }
 }

@@ -18,6 +18,7 @@ use crate::models::{
     parse_price_usdc, parse_tags_field, tags_to_json, text_preview_snippet, validate_category,
     validate_license, validate_wallet, ListingPublic,
 };
+use crate::moderation::{moderation_labels_json, scan_listing_upload, ListingModerationInput};
 use crate::preview::{
     self, generate_media_clip, generate_pdf_first_page_jpeg, is_pdf_content_type,
 };
@@ -92,9 +93,14 @@ pub async fn list(
         .list_listings(&filters, &q.sort, q.limit, q.offset)
         .await?;
     let base = state.config.seller_public_base_url.clone();
+    let ids: Vec<Uuid> = rows.iter().map(|r| r.id).collect();
+    let quality_stats = state.db.listing_quality_stats(&ids).await?;
     let items = rows
         .into_iter()
-        .map(|r| ListingPublic::from_row(r, &base))
+        .map(|r| {
+            let quality = quality_stats.get(&r.id).cloned();
+            ListingPublic::from_row_with_quality(r, &base, quality)
+        })
         .collect();
     Ok(Json(ListResponse { items, total }))
 }
@@ -104,9 +110,11 @@ pub async fn get_one(
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<ListingPublic>> {
     let row = state.db.get_listing(id).await?;
-    Ok(Json(ListingPublic::from_row(
+    let mut quality_stats = state.db.listing_quality_stats(&[id]).await?;
+    Ok(Json(ListingPublic::from_row_with_quality(
         row,
         &state.config.seller_public_base_url,
+        quality_stats.remove(&id),
     )))
 }
 
@@ -177,9 +185,14 @@ pub async fn download(
     let path = format!("/api/v1/listings/{id}/download");
     let payment = PaymentGate::check_download_active_or_paid(&state, &headers, &row, &path).await?;
 
-    if !payment.already_paid {
-        record_sale(&state, &row, &payment).await?;
-    }
+    let sale_row = if payment.already_paid {
+        state
+            .db
+            .find_sale_by_payment(row.id, &payment.payer_wallet, &payment.payment_signature)
+            .await?
+    } else {
+        Some(record_sale(&state, &row, &payment).await?)
+    };
 
     let (stream, content_type) = state.storage.stream(&row.asset_key).await?;
     let body = Body::from_stream(stream.map(|result| result.map_err(axum::Error::new)));
@@ -192,6 +205,14 @@ pub async fn download(
         )
         .body(body)
         .map_err(|e| AppError::Internal(e.into()))?;
+
+    if let Some(sale) = sale_row {
+        response.headers_mut().insert(
+            "X-Forge-Sale-Id",
+            header::HeaderValue::from_str(&sale.id.to_string())
+                .map_err(|e| AppError::Internal(e.into()))?,
+        );
+    }
 
     if !payment.settle_proof.is_null() {
         response = PaymentGate::attach_payment_response(response, &payment.settle_proof);
@@ -242,7 +263,7 @@ async fn record_sale(
     state: &SharedState,
     listing: &ListingRow,
     payment: &PaymentContext,
-) -> AppResult<()> {
+) -> AppResult<crate::db::SaleRow> {
     let tx = payment
         .settle_proof
         .get("transaction")
@@ -259,8 +280,8 @@ async fn record_sale(
             &tx,
         )
         .await?;
-    let _ = state.sale_events.send(sale);
-    Ok(())
+    let _ = state.sale_events.send(sale.clone());
+    Ok(sale)
 }
 
 const VAULT_REQUIRED_MSG: &str = "Activate your pr402 SplitVault before publishing.";
@@ -427,7 +448,22 @@ pub async fn create(
     let (asset_ct, asset_data) =
         asset_bytes.ok_or_else(|| AppError::validation("asset", "file required"))?;
 
-    let content_hash = content_hash.or_else(|| Some(sha256_hex(&asset_data)));
+    let computed_hash = sha256_hex(&asset_data);
+    if let Some(ref provided) = content_hash {
+        if provided.trim().to_ascii_lowercase() != computed_hash {
+            return Err(AppError::validation(
+                "content_hash",
+                "must match SHA-256 of uploaded asset",
+            ));
+        }
+    }
+    let content_hash = Some(computed_hash.clone());
+
+    if state.db.is_content_hash_blocked(&computed_hash).await? {
+        return Err(AppError::Forbidden(
+            "this content hash is blocked from upload".into(),
+        ));
+    }
 
     if !state.config.skip_seller_auth {
         state.seller_auth.verify_and_consume(
@@ -439,6 +475,45 @@ pub async fn create(
 
     if !vault_checked {
         require_seller_vault(&state, &seller_wallet).await?;
+    }
+
+    let preview_for_scan = preview_bytes.as_ref().map(|(_, data)| data);
+    let preview_ct_for_scan = preview_bytes.as_ref().map(|(ct, _)| ct.as_str());
+    let moderation = scan_listing_upload(
+        &state.config.moderation,
+        ListingModerationInput {
+            title: title.trim(),
+            description: &description,
+            tags: &tags,
+            asset_content_type: &asset_ct,
+            asset_data: &asset_data,
+            preview_data: preview_for_scan,
+            preview_content_type: preview_ct_for_scan,
+        },
+    )
+    .await;
+    let moderation = match moderation {
+        Ok(result) => result,
+        Err(e) => {
+            if state.config.moderation.fail_closed {
+                return Err(e);
+            }
+            tracing::warn!(error = %e, "content moderation unavailable; allowing upload");
+            crate::moderation::ModerationScanResult {
+                flagged: false,
+                labels: Vec::new(),
+            }
+        }
+    };
+    if moderation.flagged {
+        let detail = if moderation.labels.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", moderation.labels.join(", "))
+        };
+        return Err(AppError::BadRequest(format!(
+            "listing blocked by content moderation{detail}"
+        )));
     }
 
     let id = Uuid::new_v4();
@@ -476,6 +551,8 @@ pub async fn create(
         tags: tags_to_json(&tags),
         license,
         content_hash,
+        moderation_status: "approved".into(),
+        moderation_labels: moderation_labels_json(&moderation.labels),
         created_at: Utc::now(),
     };
 

@@ -21,5 +21,7 @@ pub struct ListingRow {
     pub tags: String,
     pub license: Option<String>,
     pub content_hash: Option<String>,
+    pub moderation_status: String,
+    pub moderation_labels: String,
     pub created_at: DateTime<Utc>,
 }

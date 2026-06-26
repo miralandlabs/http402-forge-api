@@ -21,6 +21,8 @@ CREATE TABLE IF NOT EXISTS listings (
     tags TEXT NOT NULL DEFAULT '[]',
     license TEXT,
     content_hash TEXT,
+    moderation_status TEXT NOT NULL DEFAULT 'approved',
+    moderation_labels TEXT NOT NULL DEFAULT '[]',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -42,6 +44,24 @@ CREATE INDEX IF NOT EXISTS idx_sales_settled ON sales (settled_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sales_seller ON sales (seller_wallet, settled_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sales_buyer ON sales (buyer_wallet, settled_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sales_listing ON sales (listing_id, settled_at DESC);
+
+CREATE TABLE IF NOT EXISTS sale_feedback (
+    sale_id UUID PRIMARY KEY REFERENCES sales(id),
+    listing_id UUID NOT NULL REFERENCES listings(id),
+    buyer_wallet TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    score SMALLINT CHECK (score IS NULL OR (score >= 1 AND score <= 5)),
+    note TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_sale_feedback_listing ON sale_feedback (listing_id);
+
+CREATE TABLE IF NOT EXISTS blocked_content_hashes (
+    content_hash TEXT PRIMARY KEY,
+    reason TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 
 CREATE TABLE IF NOT EXISTS payments (
     idempotency_key TEXT PRIMARY KEY,

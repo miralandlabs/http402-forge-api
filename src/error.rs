@@ -25,6 +25,9 @@ pub enum AppError {
     #[error("forbidden: {0}")]
     Forbidden(String),
 
+    #[error("conflict: {0}")]
+    Conflict(String),
+
     #[error("payment config: {0}")]
     PaymentConfig(String),
 
@@ -65,6 +68,7 @@ impl IntoResponse for AppError {
                 json!({ "error": "Bad request", "message": msg }),
             ),
             AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, json!({ "error": msg })),
+            AppError::Conflict(msg) => (StatusCode::CONFLICT, json!({ "error": msg })),
             AppError::PaymentConfig(msg) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 json!({ "error": "Payment requirements unavailable", "message": msg }),

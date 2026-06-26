@@ -3,6 +3,7 @@ mod config;
 mod db;
 mod error;
 mod models;
+mod moderation;
 mod preview;
 mod rate_limit;
 mod routes;

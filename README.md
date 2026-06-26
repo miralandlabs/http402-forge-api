@@ -75,6 +75,7 @@ The API looks up `ffmpeg` and `pdftoppm` on **`PATH`** by default. If binaries l
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - [docs/AGENT_API.md](docs/AGENT_API.md)
+- [docs/openapi.yaml](docs/openapi.yaml)
 - [docs/SELLER_GUIDE.md](docs/SELLER_GUIDE.md)
 
 ## Devnet E2E

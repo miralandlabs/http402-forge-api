@@ -47,6 +47,8 @@ Send `seller_wallet` **before** `asset` / `preview` fields so the API can verify
 
 Categories: `art`, `text`, `audio`, `video`, `prompt_pack`.
 
+**Content moderation:** when `MODERATION_PROVIDER=openai`, uploads are scanned before storage. Flagged content returns **400** (`listing blocked by content moderation`). Sellers cannot bypass via a mismatched `content_hash` — the server always stores SHA-256 of the asset bytes.
+
 ## 3. Get paid
 
 Buyers hit `GET /api/v1/listings/{id}/download`. Payment settles to **your** SplitVault PDA — Forge is not custodian.

@@ -3,6 +3,7 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::db::ListingRow;
+use crate::db::ListingQualityStats;
 
 pub const CATEGORIES: &[&str] = &["art", "text", "audio", "video", "prompt_pack"];
 
@@ -31,11 +32,23 @@ pub struct ListingPublic {
     pub license: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quality_score: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verified_feedback_count: Option<i64>,
     pub created_at: chrono::DateTime<Utc>,
 }
 
 impl ListingPublic {
     pub fn from_row(row: ListingRow, base_url: &str) -> Self {
+        Self::from_row_with_quality(row, base_url, None)
+    }
+
+    pub fn from_row_with_quality(
+        row: ListingRow,
+        base_url: &str,
+        quality: Option<ListingQualityStats>,
+    ) -> Self {
         let base = base_url.trim_end_matches('/');
         Self {
             id: row.id,
@@ -54,6 +67,14 @@ impl ListingPublic {
             tags: parse_tags_json(&row.tags),
             license: row.license,
             content_hash: row.content_hash,
+            quality_score: quality
+                .as_ref()
+                .filter(|q| q.verified_feedback_count > 0)
+                .map(|q| q.quality_score),
+            verified_feedback_count: quality
+                .as_ref()
+                .filter(|q| q.verified_feedback_count > 0)
+                .map(|q| q.verified_feedback_count),
             created_at: row.created_at,
         }
     }
