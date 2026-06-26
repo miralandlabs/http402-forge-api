@@ -22,9 +22,11 @@ jobs:
         run: |
           if [ "${{ github.ref }}" = "refs/heads/main" ]; then
             echo "CLUSTER=mainnet" >> "$GITHUB_ENV"
+            echo "HEALTH_PORT=8093" >> "$GITHUB_ENV"
             echo "HEALTH_URL=https://forge.http402.trade/health" >> "$GITHUB_ENV"
           else
             echo "CLUSTER=devnet" >> "$GITHUB_ENV"
+            echo "HEALTH_PORT=8092" >> "$GITHUB_ENV"
             echo "HEALTH_URL=https://preview.forge.http402.trade/health" >> "$GITHUB_ENV"
           fi
 
@@ -48,28 +50,40 @@ jobs:
               --cluster "$CLUSTER" \
               --repo-root "$REPO"
 
-      - name: Smoke test API health
-        run: |
-          set -euo pipefail
-          URL="${{ env.HEALTH_URL }}"
-          BASE="${URL%/health}"
-          for i in 1 2 3 4 5; do
-            if curl -fsS "$URL" | jq -e '.status == "healthy"' >/dev/null; then
-              echo "✅ $URL"
-              break
-            fi
-            if [ "$i" -eq 5 ]; then
-              echo "❌ Health check failed for $URL" >&2
+      - name: Smoke test on VPS
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.FORGE_VPS_HOST }}
+          username: ${{ secrets.FORGE_VPS_USER }}
+          key: ${{ secrets.FORGE_VPS_SSH_KEY }}
+          command_timeout: 5m
+          envs: HEALTH_PORT,HEALTH_URL
+          script: |
+            set -euo pipefail
+            LOCAL="http://127.0.0.1:${HEALTH_PORT}/health"
+            echo "=== localhost (Docker API) ==="
+            curl -fsS "$LOCAL" | jq -e '.status == "healthy" or .status == "ok"'
+            echo "✅ $LOCAL"
+
+            DELIST_LOCAL="http://127.0.0.1:${HEALTH_PORT}/api/v1/seller/delist-challenge?seller_wallet=buyA5hR1Z9KtHQRBTmLkjsFfjAabDwdZtrRC6edqxAJ&listing_id=00000000-0000-0000-0000-000000000001"
+            BODY="$(curl -sS "$DELIST_LOCAL" 2>/dev/null || true)"
+            CODE="$(curl -sS -o /dev/null -w '%{http_code}' "$DELIST_LOCAL" 2>/dev/null || echo 000)"
+            if [ "$CODE" = "200" ] || { [ "$CODE" = "404" ] && [ -n "$BODY" ]; }; then
+              echo "✅ delist-challenge route (HTTP ${CODE})"
+            else
+              echo "❌ delist-challenge missing on localhost (HTTP ${CODE})" >&2
               exit 1
             fi
-            sleep 5
-          done
-          DELIST="${BASE}/api/v1/seller/delist-challenge?seller_wallet=buyA5hR1Z9KtHQRBTmLkjsFfjAabDwdZtrRC6edqxAJ&listing_id=00000000-0000-0000-0000-000000000001"
-          BODY="$(curl -sS "$DELIST" 2>/dev/null || true)"
-          CODE="$(curl -sS -o /dev/null -w '%{http_code}' "$DELIST")"
-          if [ "$CODE" = "200" ] || { [ "$CODE" = "404" ] && [ -n "$BODY" ]; }; then
-            echo "✅ delist-challenge route (HTTP ${CODE})"
-            exit 0
-          fi
-          echo "❌ delist-challenge missing or stale binary (HTTP ${CODE}, body len=${#BODY})" >&2
-          exit 1
+
+            echo "=== public HTTPS ==="
+            if curl -fsS "$HEALTH_URL" | jq -e '.status == "healthy" or .status == "ok"' >/dev/null; then
+              echo "✅ $HEALTH_URL"
+              exit 0
+            fi
+
+            echo "❌ public health failed: $HEALTH_URL" >&2
+            echo "Docker API is up on $LOCAL — this is usually nginx/TLS on :443." >&2
+            echo "--- nginx ---" >&2
+            systemctl status nginx --no-pager -l >&2 || true
+            ss -ltn 'sport = :443' >&2 || true
+            exit 1
