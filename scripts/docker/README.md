@@ -176,6 +176,15 @@ Defaults: `RUST_LOG=http402_forge_api=info,tower_http=warn`. File sink uses `tra
 
 **Re-run `forge-install.sh`?** Not required if you already ran install once — `forge-deploy.sh` syncs systemd units and creates log dirs. Re-run install only for a fresh host or to refresh env templates (it does not overwrite existing `/etc/forge/*.env`).
 
+After changing nginx timeouts, re-apply on the VPS:
+
+```bash
+sudo bash http402-forge-api/scripts/docker/forge-nginx-setup.sh
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+Default nginx `proxy_read_timeout` is 60s — too short for large paid downloads streaming from R2. The setup script now uses 600s and `proxy_buffering off`.
+
 ## Rollback
 
 ```bash
