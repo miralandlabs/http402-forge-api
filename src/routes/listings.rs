@@ -11,7 +11,6 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::db::normalize_search;
 use crate::db::ListingFilterBinds;
 use crate::db::ListingRow;
 use crate::error::{AppError, AppResult};
@@ -73,17 +72,19 @@ pub async fn list(
         validate_category(c).map_err(AppError::BadRequest)?;
     }
     let agent_friendly = parse_optional_bool(q.agent_friendly.as_deref());
-    let search = normalize_search(q.q);
-    let search_ref = search.as_deref();
-    let seller_wallet = q
+    let seller_wallet_param = q
         .seller_wallet
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty());
-    if let Some(w) = seller_wallet {
+    if let Some(w) = seller_wallet_param {
         validate_wallet(w).map_err(|m| AppError::validation("seller_wallet", m))?;
     }
-    let filters = ListingFilterBinds::new(cat, agent_friendly, search_ref, seller_wallet);
+    let filters =
+        ListingFilterBinds::from_query(cat, agent_friendly, q.q.clone(), seller_wallet_param);
+    if let Some(ref w) = filters.seller_wallet {
+        validate_wallet(w).map_err(|m| AppError::validation("seller_wallet", m))?;
+    }
     let total = state.db.count_listings(&filters).await?;
     let rows = state
         .db

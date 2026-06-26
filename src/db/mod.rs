@@ -6,7 +6,7 @@ mod sales;
 mod sqlite;
 
 pub use listing::ListingRow;
-pub use listing_filters::{normalize_search, ListingFilterBinds};
+pub use listing_filters::ListingFilterBinds;
 pub use payment::PaymentRow;
 pub use sales::{LeaderboardListingRow, LeaderboardWalletRow, SaleRow};
 
