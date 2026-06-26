@@ -143,6 +143,28 @@ prepare_service_start() {
     systemctl stop "$SERVICE" 2>/dev/null || true
     docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
     systemctl reset-failed "$SERVICE" 2>/dev/null || true
+    ensure_health_port_free
+}
+
+ensure_health_port_free() {
+    local port="$HEALTH_PORT"
+    if ! command -v ss >/dev/null 2>&1; then
+        return 0
+    fi
+    if ! ss -ltn "sport = :$port" 2>/dev/null | grep -q LISTEN; then
+        return 0
+    fi
+    echo "[deploy] port ${port} still listening after stop; freeing…" >&2
+    ss -ltnp "sport = :$port" 2>&1 || true
+    if command -v fuser >/dev/null 2>&1; then
+        fuser -k "${port}/tcp" >/dev/null 2>&1 || true
+        sleep 1
+    fi
+    if ss -ltn "sport = :$port" 2>/dev/null | grep -q LISTEN; then
+        echo "[deploy] ERROR: port ${port} still in use — stale forge process?" >&2
+        ss -ltnp "sport = :$port" 2>&1 || true
+        exit 65
+    fi
 }
 
 warn_port_conflict() {
@@ -174,6 +196,27 @@ probe_health() {
         fi
         sleep 2
     done
+    return 1
+}
+
+# Empty 404 = axum route missing (stale binary). JSON 404 = route ok, listing absent.
+probe_delist_route() {
+    local url="http://127.0.0.1:${HEALTH_PORT}/api/v1/seller/delist-challenge"
+    url+="?seller_wallet=buyA5hR1Z9KtHQRBTmLkjsFfjAabDwdZtrRC6edqxAJ"
+    url+="&listing_id=00000000-0000-0000-0000-000000000001"
+    local body code
+    body="$(curl -fsS "$url" 2>/dev/null || true)"
+    code="$(curl -sS -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || echo 000)"
+    if [[ "$code" == "404" && -n "$body" ]]; then
+        echo "[deploy] delist-challenge route registered"
+        return 0
+    fi
+    if [[ "$code" == "403" || "$code" == "422" ]]; then
+        echo "[deploy] delist-challenge route registered (HTTP ${code})"
+        return 0
+    fi
+    echo "[deploy] ERROR: delist-challenge probe failed (HTTP ${code}, body len=${#body})" >&2
+    echo "[deploy] hint: stale process on port ${HEALTH_PORT} or old image — re-run with --no-cache" >&2
     return 1
 }
 
@@ -274,6 +317,10 @@ echo "[deploy] restarted ${SERVICE}; probing /health on port ${HEALTH_PORT}…"
 
 if probe_health; then
     echo "[deploy] /health → healthy"
+    if ! probe_delist_route; then
+        show_deploy_failure
+        exit 1
+    fi
     echo "[deploy] done ${SERVICE} sha=${SHA} port=${HEALTH_PORT}"
     echo "[deploy] roll back: sudo bash $0 --cluster ${CLUSTER} --rollback"
     exit 0

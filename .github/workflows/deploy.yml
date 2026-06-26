@@ -48,13 +48,26 @@ jobs:
 
       - name: Smoke test API health
         run: |
+          set -euo pipefail
           URL="${{ env.HEALTH_URL }}"
+          BASE="${URL%/health}"
           for i in 1 2 3 4 5; do
             if curl -fsS "$URL" | jq -e '.status == "healthy"' >/dev/null; then
               echo "✅ $URL"
-              exit 0
+              break
+            fi
+            if [ "$i" -eq 5 ]; then
+              echo "❌ Health check failed for $URL" >&2
+              exit 1
             fi
             sleep 5
           done
-          echo "❌ Health check failed for $URL" >&2
+          DELIST="${BASE}/api/v1/seller/delist-challenge?seller_wallet=buyA5hR1Z9KtHQRBTmLkjsFfjAabDwdZtrRC6edqxAJ&listing_id=00000000-0000-0000-0000-000000000001"
+          BODY="$(curl -fsS "$DELIST" 2>/dev/null || true)"
+          CODE="$(curl -sS -o /dev/null -w '%{http_code}' "$DELIST")"
+          if [ "$CODE" = "404" ] && [ -n "$BODY" ]; then
+            echo "✅ delist-challenge route (404 with JSON body)"
+            exit 0
+          fi
+          echo "❌ delist-challenge missing or stale binary (HTTP ${CODE}, body len=${#BODY})" >&2
           exit 1
