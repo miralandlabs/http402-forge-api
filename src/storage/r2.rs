@@ -6,7 +6,7 @@ use s3::bucket::Bucket;
 use s3::creds::Credentials;
 use s3::region::Region;
 
-use super::{ByteStream, ObjectStore};
+use super::{ByteStream, ObjectStore, PresignedPut};
 use crate::config::AppConfig;
 use crate::error::{AppError, AppResult};
 
@@ -52,19 +52,24 @@ impl R2Storage {
         })
     }
 
-    async fn content_type_for(&self, key: &str) -> AppResult<String> {
+    async fn head_meta(&self, key: &str) -> AppResult<(String, u64)> {
         let (head, code) = self
             .bucket
             .head_object(key)
             .await
             .map_err(|e| AppError::Storage(e.to_string()))?;
-        if code != 200 {
+        if code == 404 {
             return Err(AppError::NotFound);
         }
-        Ok(head
+        if code != 200 {
+            return Err(AppError::Storage(format!("R2 head {key}: HTTP {code}")));
+        }
+        let content_type = head
             .content_type
             .clone()
-            .unwrap_or_else(|| "application/octet-stream".to_string()))
+            .unwrap_or_else(|| "application/octet-stream".to_string());
+        let size = head.content_length.unwrap_or(0).max(0) as u64;
+        Ok((content_type, size))
     }
 }
 
@@ -79,7 +84,7 @@ impl ObjectStore for R2Storage {
     }
 
     async fn get(&self, key: &str) -> AppResult<(Bytes, String)> {
-        let content_type = self.content_type_for(key).await?;
+        let (content_type, _) = self.head_meta(key).await?;
         let response = self
             .bucket
             .get_object(key)
@@ -96,16 +101,16 @@ impl ObjectStore for R2Storage {
     }
 
     async fn head(&self, key: &str) -> AppResult<String> {
-        self.content_type_for(key).await
+        Ok(self.head_meta(key).await?.0)
+    }
+
+    async fn object_size(&self, key: &str) -> AppResult<u64> {
+        Ok(self.head_meta(key).await?.1)
     }
 
     async fn stream(&self, key: &str) -> AppResult<(ByteStream, String)> {
-        let content_type = self.content_type_for(key).await?;
-        let url = self
-            .bucket
-            .presign_get(key, 300, None)
-            .await
-            .map_err(|e| AppError::Storage(e.to_string()))?;
+        let (content_type, _) = self.head_meta(key).await?;
+        let url = self.presign_get(key, 300).await?;
         let response = self
             .http
             .get(url)
@@ -122,5 +127,31 @@ impl ObjectStore for R2Storage {
             .bytes_stream()
             .map(|chunk| chunk.map_err(std::io::Error::other));
         Ok((Box::pin(stream), content_type))
+    }
+
+    async fn presign_get(&self, key: &str, ttl_secs: u32) -> AppResult<String> {
+        self.bucket
+            .presign_get(key, ttl_secs, None)
+            .await
+            .map_err(|e| AppError::Storage(e.to_string()))
+    }
+
+    async fn presign_put(
+        &self,
+        key: &str,
+        content_type: &str,
+        ttl_secs: u32,
+    ) -> AppResult<PresignedPut> {
+        let url = self
+            .bucket
+            .presign_put(key, ttl_secs, None, None)
+            .await
+            .map_err(|e| AppError::Storage(e.to_string()))?;
+        Ok(PresignedPut {
+            object_key: key.to_string(),
+            method: "PUT",
+            url,
+            headers: vec![("Content-Type".into(), content_type.to_string())],
+        })
     }
 }

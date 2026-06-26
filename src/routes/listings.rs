@@ -1,5 +1,4 @@
 use axum::{
-    body::Body,
     extract::{Multipart, Path, Query, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
@@ -7,7 +6,6 @@ use axum::{
 };
 use bytes::Bytes;
 use chrono::Utc;
-use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -23,7 +21,7 @@ use crate::preview::{
     self, generate_media_clip, generate_pdf_first_page_jpeg, is_pdf_content_type,
 };
 use crate::state::SharedState;
-use crate::storage::{object_key, ObjectStore};
+use crate::storage::{object_key, serve_object, DeliveryQuery, ObjectServeOptions, ObjectStore};
 use crate::x402::{PaymentContext, PaymentGate};
 
 #[derive(Debug, Deserialize)]
@@ -121,9 +119,11 @@ pub async fn get_one(
 pub async fn preview(
     State(state): State<SharedState>,
     Path(id): Path<Uuid>,
+    Query(delivery_q): Query<DeliveryQuery>,
 ) -> AppResult<Response> {
     let row = state.db.get_listing(id).await?;
     let (stream_key, content_type) = resolve_preview_key_and_type(&state, &row).await?;
+    let format = delivery_q.format(&state.config)?;
 
     if content_type.starts_with("text/") || content_type == "application/json" {
         let (bytes, _) = state.storage.get(&stream_key).await?;
@@ -137,15 +137,18 @@ pub async fn preview(
             .into_response());
     }
 
-    let (stream, content_type) = state.storage.stream(&stream_key).await?;
-    let body = Body::from_stream(stream.map(|result| result.map_err(axum::Error::new)));
-    let response = Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, content_type)
-        .header(header::ACCEPT_RANGES, "bytes")
-        .body(body)
-        .map_err(|e| AppError::Internal(e.into()))?;
-    Ok(response)
+    serve_object(
+        &state,
+        ObjectServeOptions {
+            key: &stream_key,
+            content_type: &content_type,
+            content_disposition: None,
+            extra_headers: HeaderMap::new(),
+            format,
+            sale_id: None,
+        },
+    )
+    .await
 }
 
 async fn resolve_preview_key_and_type(
@@ -179,6 +182,7 @@ async fn resolve_preview_key_and_type(
 pub async fn download(
     State(state): State<SharedState>,
     Path(id): Path<Uuid>,
+    Query(delivery_q): Query<DeliveryQuery>,
     headers: HeaderMap,
 ) -> AppResult<Response> {
     let row = state.db.get_listing_any(id).await?;
@@ -212,7 +216,14 @@ pub async fn download(
     } else {
         Some(&payment.settle_proof)
     };
-    build_asset_download_response(&state, &row, sale_row.as_ref(), settle).await
+    build_asset_download_response(
+        &state,
+        &row,
+        sale_row.as_ref(),
+        settle,
+        delivery_q.format(&state.config)?,
+    )
+    .await
 }
 
 #[derive(Debug, Deserialize)]
@@ -281,7 +292,10 @@ async fn record_sale(
 
 const VAULT_REQUIRED_MSG: &str = "Activate your pr402 SplitVault before publishing.";
 
-async fn require_seller_vault(state: &SharedState, seller_wallet: &str) -> AppResult<()> {
+pub(crate) async fn require_seller_vault(
+    state: &SharedState,
+    seller_wallet: &str,
+) -> AppResult<()> {
     let ok = state
         .facilitator
         .seller_has_vault(seller_wallet)
@@ -312,26 +326,33 @@ pub(crate) async fn build_asset_download_response(
     row: &ListingRow,
     sale: Option<&crate::db::SaleRow>,
     settle_proof: Option<&serde_json::Value>,
+    format: crate::storage::DeliveryFormat,
 ) -> AppResult<Response> {
-    let (stream, content_type) = state.storage.stream(&row.asset_key).await?;
-    let body = Body::from_stream(stream.map(|result| result.map_err(axum::Error::new)));
-    let mut response = Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, content_type)
-        .header(
-            header::CONTENT_DISPOSITION,
-            format!("attachment; filename=\"{}\"", sanitize_filename(&row.title)),
-        )
-        .body(body)
-        .map_err(|e| AppError::Internal(e.into()))?;
-
-    if let Some(sale) = sale {
-        response.headers_mut().insert(
+    let content_type = state.storage.head(&row.asset_key).await?;
+    let sale_id_str = sale.map(|s| s.id.to_string());
+    let mut extra_headers = HeaderMap::new();
+    if let Some(ref sale_id) = sale_id_str {
+        extra_headers.insert(
             "X-Forge-Sale-Id",
-            header::HeaderValue::from_str(&sale.id.to_string())
-                .map_err(|e| AppError::Internal(e.into()))?,
+            header::HeaderValue::from_str(sale_id).map_err(|e| AppError::Internal(e.into()))?,
         );
     }
+
+    let mut response = serve_object(
+        state,
+        ObjectServeOptions {
+            key: &row.asset_key,
+            content_type: &content_type,
+            content_disposition: Some(format!(
+                "attachment; filename=\"{}\"",
+                sanitize_filename(&row.title)
+            )),
+            extra_headers,
+            format,
+            sale_id: sale_id_str.as_deref(),
+        },
+    )
+    .await?;
 
     if let Some(settle) = settle_proof {
         response = PaymentGate::attach_payment_response(response, settle);
@@ -461,22 +482,98 @@ pub async fn create(
     }
 
     validate_wallet(&seller_wallet).map_err(|m| AppError::validation("seller_wallet", m))?;
-    validate_category(&category).map_err(|m| AppError::validation("category", m))?;
-    if title.trim().is_empty() || title.len() > 120 {
-        return Err(AppError::validation("title", "required, max 120 chars"));
-    }
-    if description.len() > 2000 {
-        return Err(AppError::validation("description", "max 2000 chars"));
-    }
-    let price_micro =
-        parse_price_usdc(&price_usdc).map_err(|m| AppError::validation("price_usdc", m))?;
-    validate_license(license.as_deref()).map_err(|m| AppError::validation("license", m))?;
-    let tags = parse_tags_field(&tags_raw).map_err(|m| AppError::validation("tags", m))?;
     let (asset_ct, asset_data) =
         asset_bytes.ok_or_else(|| AppError::validation("asset", "file required"))?;
 
-    let computed_hash = sha256_hex(&asset_data);
-    if let Some(ref provided) = content_hash {
+    if !state.config.skip_seller_auth {
+        state.seller_auth.verify_and_consume(
+            &seller_wallet,
+            &seller_challenge,
+            &seller_signature,
+        )?;
+    }
+
+    if !vault_checked {
+        require_seller_vault(&state, &seller_wallet).await?;
+    }
+
+    let id = Uuid::new_v4();
+    let asset_key = object_key("assets", id, "asset");
+    state
+        .storage
+        .put(&asset_key, &asset_ct, asset_data.clone())
+        .await?;
+
+    let row = publish_listing(
+        &state,
+        PublishListingInput {
+            seller_wallet,
+            display_name,
+            title,
+            description,
+            category,
+            price_usdc,
+            agent_friendly,
+            tags_raw,
+            license,
+            content_hash,
+            asset_ct,
+            asset_data,
+            preview_bytes,
+        },
+        id,
+        asset_key,
+        true,
+    )
+    .await?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(ListingPublic::from_row(
+            row,
+            &state.config.seller_public_base_url,
+        )),
+    ))
+}
+
+pub(crate) struct PublishListingInput {
+    pub seller_wallet: String,
+    pub display_name: Option<String>,
+    pub title: String,
+    pub description: String,
+    pub category: String,
+    pub price_usdc: String,
+    pub agent_friendly: bool,
+    pub tags_raw: String,
+    pub license: Option<String>,
+    pub content_hash: Option<String>,
+    pub asset_ct: String,
+    pub asset_data: Bytes,
+    pub preview_bytes: Option<(String, Bytes)>,
+}
+
+pub(crate) async fn publish_listing(
+    state: &SharedState,
+    input: PublishListingInput,
+    id: Uuid,
+    asset_key: String,
+    asset_already_stored: bool,
+) -> AppResult<ListingRow> {
+    validate_wallet(&input.seller_wallet).map_err(|m| AppError::validation("seller_wallet", m))?;
+    validate_category(&input.category).map_err(|m| AppError::validation("category", m))?;
+    if input.title.trim().is_empty() || input.title.len() > 120 {
+        return Err(AppError::validation("title", "required, max 120 chars"));
+    }
+    if input.description.len() > 2000 {
+        return Err(AppError::validation("description", "max 2000 chars"));
+    }
+    let price_micro =
+        parse_price_usdc(&input.price_usdc).map_err(|m| AppError::validation("price_usdc", m))?;
+    validate_license(input.license.as_deref()).map_err(|m| AppError::validation("license", m))?;
+    let tags = parse_tags_field(&input.tags_raw).map_err(|m| AppError::validation("tags", m))?;
+
+    let computed_hash = sha256_hex(&input.asset_data);
+    if let Some(ref provided) = input.content_hash {
         if provided.trim().to_ascii_lowercase() != computed_hash {
             return Err(AppError::validation(
                 "content_hash",
@@ -492,28 +589,18 @@ pub async fn create(
         ));
     }
 
-    if !state.config.skip_seller_auth {
-        state.seller_auth.verify_and_consume(
-            &seller_wallet,
-            &seller_challenge,
-            &seller_signature,
-        )?;
-    }
+    require_seller_vault(state, &input.seller_wallet).await?;
 
-    if !vault_checked {
-        require_seller_vault(&state, &seller_wallet).await?;
-    }
-
-    let preview_for_scan = preview_bytes.as_ref().map(|(_, data)| data);
-    let preview_ct_for_scan = preview_bytes.as_ref().map(|(ct, _)| ct.as_str());
+    let preview_for_scan = input.preview_bytes.as_ref().map(|(_, data)| data);
+    let preview_ct_for_scan = input.preview_bytes.as_ref().map(|(ct, _)| ct.as_str());
     let moderation = scan_listing_upload(
         &state.config.moderation,
         ListingModerationInput {
-            title: title.trim(),
-            description: &description,
+            title: input.title.trim(),
+            description: &input.description,
             tags: &tags,
-            asset_content_type: &asset_ct,
-            asset_data: &asset_data,
+            asset_content_type: &input.asset_ct,
+            asset_data: &input.asset_data,
             preview_data: preview_for_scan,
             preview_content_type: preview_ct_for_scan,
         },
@@ -543,17 +630,23 @@ pub async fn create(
         )));
     }
 
-    let id = Uuid::new_v4();
-    let asset_key = object_key("assets", id, "asset");
-    state
-        .storage
-        .put(&asset_key, &asset_ct, asset_data.clone())
-        .await?;
+    if !asset_already_stored {
+        state
+            .storage
+            .put(&asset_key, &input.asset_ct, input.asset_data.clone())
+            .await?;
+    }
 
-    let (preview_key, preview_content_type) =
-        store_listing_preview(&state, id, &asset_ct, &asset_data, preview_bytes).await?;
+    let (preview_key, preview_content_type) = store_listing_preview(
+        state,
+        id,
+        &input.asset_ct,
+        &input.asset_data,
+        input.preview_bytes,
+    )
+    .await?;
 
-    let delivery_scheme = if asset_data.len() as u64 >= state.config.escrow_size_threshold {
+    let delivery_scheme = if input.asset_data.len() as u64 >= state.config.escrow_size_threshold {
         "escrow"
     } else {
         "exact"
@@ -561,22 +654,22 @@ pub async fn create(
 
     let row = ListingRow {
         id,
-        seller_wallet: seller_wallet.clone(),
-        display_name: display_name.filter(|s| !s.is_empty()),
-        title: title.trim().to_string(),
-        description,
-        category,
+        seller_wallet: input.seller_wallet.clone(),
+        display_name: input.display_name.filter(|s| !s.is_empty()),
+        title: input.title.trim().to_string(),
+        description: input.description,
+        category: input.category,
         price_micro_usdc: price_micro,
         preview_key,
         preview_content_type,
         asset_key,
-        content_type: asset_ct,
-        byte_size: asset_data.len() as i64,
-        agent_friendly,
+        content_type: input.asset_ct,
+        byte_size: input.asset_data.len() as i64,
+        agent_friendly: input.agent_friendly,
         delivery_scheme: delivery_scheme.into(),
         status: "active".into(),
         tags: tags_to_json(&tags),
-        license,
+        license: input.license,
         content_hash,
         moderation_status: "approved".into(),
         moderation_labels: moderation_labels_json(&moderation.labels),
@@ -584,14 +677,7 @@ pub async fn create(
     };
 
     state.db.insert_listing(&row).await?;
-
-    Ok((
-        StatusCode::CREATED,
-        Json(ListingPublic::from_row(
-            row,
-            &state.config.seller_public_base_url,
-        )),
-    ))
+    Ok(row)
 }
 
 fn generate_image_preview(data: &Bytes, content_type: &str) -> AppResult<Bytes> {
@@ -705,7 +791,10 @@ async fn store_uploaded_preview(
                     "Uploaded PDF preview could not be rasterized; storing PDF for inline embed"
                 );
                 let key = object_key("previews", id, "preview.pdf");
-                state.storage.put(&key, preview_ct, preview_data.clone()).await?;
+                state
+                    .storage
+                    .put(&key, preview_ct, preview_data.clone())
+                    .await?;
                 return Ok((key, preview_ct.to_string()));
             }
         }

@@ -52,6 +52,13 @@ pub enum StorageBackend {
     R2,
 }
 
+/// How object bytes reach clients: proxy through API or redirect to presigned R2 URL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectDelivery {
+    Proxy,
+    Redirect,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModerationProvider {
     None,
@@ -83,11 +90,7 @@ impl ModerationConfig {
         let fail_closed = match std::env::var("MODERATION_FAIL_CLOSED") {
             Ok(v) if v == "1" || v.eq_ignore_ascii_case("true") => true,
             Ok(v) if v == "0" || v.eq_ignore_ascii_case("false") => false,
-            Ok(v) => {
-                return Err(format!(
-                    "MODERATION_FAIL_CLOSED must be 0 or 1; got '{v}'"
-                ))
-            }
+            Ok(v) => return Err(format!("MODERATION_FAIL_CLOSED must be 0 or 1; got '{v}'")),
             Err(_) => false,
         };
         Ok(Self {
@@ -132,6 +135,8 @@ pub struct AppConfig {
     pub skip_buyer_auth: bool,
     pub moderation: ModerationConfig,
     pub cors_allowed_origins: Vec<String>,
+    pub object_delivery: ObjectDelivery,
+    pub presign_ttl_secs: u32,
     pub version: String,
 }
 
@@ -224,8 +229,32 @@ impl AppConfig {
             },
             moderation: ModerationConfig::from_env()?,
             cors_allowed_origins: parse_cors_origins(cluster),
+            object_delivery: parse_object_delivery(storage_backend),
+            presign_ttl_secs: env_u32("PRESIGN_TTL_SECS", 300),
             version: std::env::var("FORGE_VERSION").unwrap_or_else(|_| "0.1.0".into()),
         })
+    }
+}
+
+fn parse_object_delivery(storage_backend: StorageBackend) -> ObjectDelivery {
+    match std::env::var("OBJECT_DELIVERY")
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "" => match storage_backend {
+            StorageBackend::R2 => ObjectDelivery::Redirect,
+            StorageBackend::Local => ObjectDelivery::Proxy,
+        },
+        "redirect" => ObjectDelivery::Redirect,
+        "proxy" => ObjectDelivery::Proxy,
+        v => {
+            tracing::warn!("invalid OBJECT_DELIVERY={v:?}; using default for storage backend");
+            match storage_backend {
+                StorageBackend::R2 => ObjectDelivery::Redirect,
+                StorageBackend::Local => ObjectDelivery::Proxy,
+            }
+        }
     }
 }
 

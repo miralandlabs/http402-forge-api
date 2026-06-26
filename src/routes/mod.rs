@@ -1,8 +1,9 @@
-mod events;
 mod buyer_redownload;
+mod events;
 mod health;
 mod leaderboards;
 mod listings;
+mod listings_upload;
 mod rate_limit;
 mod sale_feedback;
 mod seller;
@@ -44,6 +45,8 @@ fn cors_layer(origins: &[String]) -> CorsLayer {
         .expose_headers(ExposeHeaders::list([
             axum::http::HeaderName::from_static("x-forge-sale-id"),
             axum::http::HeaderName::from_static("payment-response"),
+            axum::http::HeaderName::from_static("x-forge-delivery"),
+            axum::http::HeaderName::from_static("location"),
         ]))
 }
 
@@ -52,6 +55,15 @@ pub fn router(state: SharedState) -> Router {
     let cors = cors_layer(&state.config.cors_allowed_origins);
 
     let limited = Router::new()
+        .route(
+            "/api/v1/listings/upload-session",
+            post(listings_upload::upload_session),
+        )
+        .route(
+            "/api/v1/listings/complete-upload",
+            post(listings_upload::complete_upload),
+        )
+        .route("/api/v1/capabilities", get(listings_upload::capabilities))
         .route(
             "/api/v1/listings",
             get(listings::list).post(listings::create),
@@ -62,7 +74,10 @@ pub fn router(state: SharedState) -> Router {
             "/api/v1/listings/{id}/redownload",
             get(buyer_redownload::redownload),
         )
-        .layer(middleware::from_fn_with_state(state.clone(), rate_limit_middleware))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit_middleware,
+        ))
         .with_state(state.clone());
 
     Router::new()

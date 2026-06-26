@@ -14,6 +14,7 @@ use crate::error::{AppError, AppResult};
 use crate::models::validate_wallet;
 use crate::routes::listings::build_asset_download_response;
 use crate::state::SharedState;
+use crate::storage::DeliveryQuery;
 
 #[derive(Debug, Deserialize)]
 pub struct RedownloadChallengeQuery {
@@ -75,6 +76,7 @@ fn buyer_auth_header(headers: &axum::http::HeaderMap, name: &str) -> AppResult<S
 pub async fn redownload(
     State(state): State<SharedState>,
     Path(listing_id): Path<Uuid>,
+    Query(delivery_q): Query<DeliveryQuery>,
     headers: axum::http::HeaderMap,
 ) -> AppResult<Response> {
     let buyer_wallet = buyer_auth_header(&headers, "x-forge-buyer-wallet")?;
@@ -89,11 +91,9 @@ pub async fn redownload(
         .to_string();
 
     if !state.config.skip_buyer_auth {
-        state.seller_auth.verify_and_consume(
-            &buyer_wallet,
-            &buyer_challenge,
-            &buyer_signature,
-        )?;
+        state
+            .seller_auth
+            .verify_and_consume(&buyer_wallet, &buyer_challenge, &buyer_signature)?;
         let challenge_listing = parse_redownload_listing_id(&buyer_challenge)
             .ok_or_else(|| AppError::Forbidden("invalid redownload challenge".into()))?;
         if challenge_listing != listing_id {
@@ -119,5 +119,12 @@ pub async fn redownload(
         "wallet redownload"
     );
 
-    build_asset_download_response(&state, &row, Some(&sale), None).await
+    build_asset_download_response(
+        &state,
+        &row,
+        Some(&sale),
+        None,
+        delivery_q.format(&state.config)?,
+    )
+    .await
 }
