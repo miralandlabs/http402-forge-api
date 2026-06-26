@@ -2,12 +2,14 @@ mod events;
 mod health;
 mod leaderboards;
 mod listings;
+mod rate_limit;
 mod seller;
 mod well_known;
 
 use axum::{
     extract::DefaultBodyLimit,
     http::HeaderValue,
+    middleware,
     routing::{get, post},
     Router,
 };
@@ -16,6 +18,8 @@ use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::state::SharedState;
+
+use self::rate_limit::rate_limit_middleware;
 
 fn cors_layer(origins: &[String]) -> CorsLayer {
     let allowed: Vec<HeaderValue> = origins.iter().filter_map(|o| o.parse().ok()).collect();
@@ -38,6 +42,16 @@ pub fn router(state: SharedState) -> Router {
     let max_body = state.config.max_asset_bytes + state.config.max_preview_bytes + 1_048_576;
     let cors = cors_layer(&state.config.cors_allowed_origins);
 
+    let limited = Router::new()
+        .route(
+            "/api/v1/listings",
+            get(listings::list).post(listings::create),
+        )
+        .route("/api/v1/listings/{id}/preview", get(listings::preview))
+        .route("/api/v1/listings/{id}/download", get(listings::download))
+        .layer(middleware::from_fn_with_state(state.clone(), rate_limit_middleware))
+        .with_state(state.clone());
+
     Router::new()
         .route("/health", get(health::health))
         .route("/api/v1/seller/challenge", get(seller::challenge))
@@ -47,16 +61,11 @@ pub fn router(state: SharedState) -> Router {
         )
         .route("/api/v1/seller/status", get(seller::status))
         .route("/api/v1/seller/provision-tx", post(seller::provision_tx))
-        .route(
-            "/api/v1/listings",
-            get(listings::list).post(listings::create),
-        )
+        .merge(limited)
         .route(
             "/api/v1/listings/{id}",
             get(listings::get_one).delete(listings::delist),
         )
-        .route("/api/v1/listings/{id}/preview", get(listings::preview))
-        .route("/api/v1/listings/{id}/download", get(listings::download))
         .route("/api/v1/leaderboards", get(leaderboards::leaderboards))
         .route("/api/v1/events", get(events::sse))
         .route(

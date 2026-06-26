@@ -4,6 +4,7 @@ mod db;
 mod error;
 mod models;
 mod preview;
+mod rate_limit;
 mod routes;
 mod state;
 mod storage;
@@ -11,6 +12,7 @@ mod x402;
 
 use std::sync::Arc;
 
+use std::net::SocketAddr;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -70,6 +72,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         max_preview_bytes = state.config.max_preview_bytes,
         "http402-forge-api listening on {bind}"
     );
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }

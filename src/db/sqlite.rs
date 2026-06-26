@@ -10,6 +10,11 @@ use crate::db::listing_filters::{listing_filter_suffix, ListingFilterBinds};
 use crate::error::{AppError, AppResult};
 
 const SCHEMA: &str = include_str!("../../migrations/sqlite/001_init.sql");
+const SCHEMA_002: &str = include_str!("../../migrations/sqlite/002_agent_metadata.sql");
+
+const LISTING_COLUMNS: &str = "id, seller_wallet, display_name, title, description, category,
+                        price_micro_usdc, preview_key, asset_key, content_type, byte_size,
+                        agent_friendly, delivery_scheme, status, tags, license, content_hash, created_at";
 
 fn configure_sqlite_connection(conn: &mut rusqlite::Connection) -> rusqlite::Result<()> {
     conn.busy_timeout(Duration::from_millis(10_000))?;
@@ -72,6 +77,25 @@ pub async fn migrate(pool: &Pool) -> AppResult<()> {
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite interact: {e}")))?
         .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite migrate: {e}")))?;
+
+    let sql2 = SCHEMA_002.to_string();
+    pool.get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite conn: {e}")))?
+        .interact(move |conn| {
+            for stmt in sql2.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+                if let Err(e) = conn.execute(stmt, []) {
+                    let msg = e.to_string();
+                    if !msg.contains("duplicate column") {
+                        return Err(e);
+                    }
+                }
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite interact: {e}")))?
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite migrate 002: {e}")))?;
     Ok(())
 }
 
@@ -103,8 +127,8 @@ pub async fn insert_listing(pool: &Pool, row: &ListingRow) -> AppResult<()> {
                 INSERT INTO listings (
                     id, seller_wallet, display_name, title, description, category,
                     price_micro_usdc, preview_key, asset_key, content_type, byte_size,
-                    agent_friendly, delivery_scheme, status, created_at
-                ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
+                    agent_friendly, delivery_scheme, status, tags, license, content_hash, created_at
+                ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)
                 "#,
                 params![
                     row.id.to_string(),
@@ -121,6 +145,9 @@ pub async fn insert_listing(pool: &Pool, row: &ListingRow) -> AppResult<()> {
                     i32::from(row.agent_friendly),
                     row.delivery_scheme,
                     row.status,
+                    row.tags,
+                    row.license,
+                    row.content_hash,
                     row.created_at.to_rfc3339(),
                 ],
             )
@@ -137,12 +164,9 @@ pub async fn get_listing(pool: &Pool, id: Uuid) -> AppResult<ListingRow> {
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite conn: {e}")))?
         .interact(move |conn| -> rusqlite::Result<Option<ListingRow>> {
-            let mut stmt = conn.prepare(
-                "SELECT id, seller_wallet, display_name, title, description, category,
-                        price_micro_usdc, preview_key, asset_key, content_type, byte_size,
-                        agent_friendly, delivery_scheme, status, created_at
-                 FROM listings WHERE id = ?1 AND status = 'active'",
-            )?;
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {LISTING_COLUMNS} FROM listings WHERE id = ?1 AND status = 'active'",
+            ))?;
             let mut rows = stmt.query(params![id])?;
             if let Some(row) = rows.next()? {
                 return Ok(Some(map_listing(row)?));
@@ -161,12 +185,9 @@ pub async fn get_listing_any(pool: &Pool, id: Uuid) -> AppResult<ListingRow> {
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite conn: {e}")))?
         .interact(move |conn| -> rusqlite::Result<Option<ListingRow>> {
-            let mut stmt = conn.prepare(
-                "SELECT id, seller_wallet, display_name, title, description, category,
-                        price_micro_usdc, preview_key, asset_key, content_type, byte_size,
-                        agent_friendly, delivery_scheme, status, created_at
-                 FROM listings WHERE id = ?1",
-            )?;
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {LISTING_COLUMNS} FROM listings WHERE id = ?1",
+            ))?;
             let mut rows = stmt.query(params![id])?;
             if let Some(row) = rows.next()? {
                 return Ok(Some(map_listing(row)?));
@@ -252,14 +273,12 @@ pub async fn list_listings(
     let order = match sort.as_str() {
         "price_asc" => "price_micro_usdc ASC, created_at DESC",
         "price_desc" => "price_micro_usdc DESC, created_at DESC",
-        _ => "created_at DESC",
+        "newest" => "created_at DESC",
+        "trending" => "(SELECT COUNT(*) FROM sales s WHERE s.listing_id = listings.id AND s.settled_at >= datetime('now', '-24 hours')) DESC, created_at DESC",
+        _ => "(SELECT COUNT(*) FROM sales s WHERE s.listing_id = listings.id AND s.settled_at >= datetime('now', '-24 hours')) DESC, created_at DESC",
     };
-    let select = "SELECT id, seller_wallet, display_name, title, description, category,
-                        price_micro_usdc, preview_key, asset_key, content_type, byte_size,
-                        agent_friendly, delivery_scheme, status, created_at
-                 FROM listings";
     let sql = format!(
-        "{select} WHERE status = 'active'{suffix} ORDER BY {order} LIMIT ?{next_idx} OFFSET ?{}",
+        "SELECT {LISTING_COLUMNS} FROM listings WHERE status = 'active'{suffix} ORDER BY {order} LIMIT ?{next_idx} OFFSET ?{}",
         next_idx + 1
     );
     let values = listing_filter_values(binds, Some(limit), Some(offset));
@@ -447,7 +466,10 @@ fn map_listing(row: &Row<'_>) -> rusqlite::Result<ListingRow> {
         agent_friendly: row.get::<_, i32>(11)? != 0,
         delivery_scheme: row.get(12)?,
         status: row.get(13)?,
-        created_at: parse_datetime(row.get::<_, String>(14)?)?,
+        tags: row.get(14)?,
+        license: row.get(15)?,
+        content_hash: row.get(16)?,
+        created_at: parse_datetime(row.get::<_, String>(17)?)?,
     })
 }
 

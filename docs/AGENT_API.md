@@ -46,7 +46,7 @@ GET /api/v1/listings?q=cyberpunk&seller_wallet=AbC…&category=art&agent_friendl
 | `seller_wallet` | Optional. Exact match on seller pubkey (base58). Combine with `q` to search within one seller's catalog. |
 | `category` | `art`, `text`, `audio`, `video`, `prompt_pack` |
 | `agent_friendly` | `true` / `false` |
-| `sort` | `newest` (default), `price_asc`, `price_desc` |
+| `sort` | `trending` (default), `newest`, `price_asc`, `price_desc` |
 | `limit` | 1–100 (default 20) |
 | `offset` | Pagination offset |
 
@@ -68,6 +68,9 @@ Response:
       "byteSize": 4096,
       "agentFriendly": true,
       "deliveryScheme": "exact",
+      "tags": ["prompt", "agent"],
+      "license": "personal",
+      "contentHash": "a1b2c3…",
       "previewUrl": "https://api.http402.trade/api/v1/listings/550e8400-e29b-41d4-a716-446655440000/preview",
       "createdAt": "2026-06-24T12:00:00Z"
     }
@@ -99,6 +102,9 @@ Content-Type: multipart/form-data
 | `category` | yes | `art`, `text`, `audio`, `video`, `prompt_pack` |
 | `price_usdc` | yes | UI amount, e.g. `0.05` |
 | `agent_friendly` | no | default false |
+| `tags` | no | Comma-separated or JSON array (agent-oriented listings) |
+| `license` | no | `personal` or `commercial` |
+| `content_hash` | no | SHA-256 hex of asset; computed automatically if omitted |
 | `asset` | yes | paid download file |
 | `preview` | no | optional; auto JPEG thumbnail for images if omitted |
 
@@ -188,7 +194,11 @@ Idempotency: same payment signature returns the file without double-charging (ch
 GET /api/v1/listings/{id}/preview
 ```
 
-Returns preview bytes (image/jpeg thumbnail, uploaded preview, or text snippet).
+Returns a **text snippet** (buffered, max ~500 chars) for `text/*` and `application/json` previews.
+
+For **image, video, and audio** previews, the response is **streamed** (not fully buffered server-side). Clients should use the `previewUrl` from the listing JSON directly as a media `src` URL. Response includes `Accept-Ranges: bytes` for seekable media.
+
+Legacy listings that stored a text placeholder for video/audio fall back to streaming the full asset clip.
 
 ## Leaderboards
 

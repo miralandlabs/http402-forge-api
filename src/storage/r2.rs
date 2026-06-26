@@ -95,6 +95,10 @@ impl ObjectStore for R2Storage {
         Ok((Bytes::from(bytes.to_vec()), content_type))
     }
 
+    async fn head(&self, key: &str) -> AppResult<String> {
+        self.content_type_for(key).await
+    }
+
     async fn stream(&self, key: &str) -> AppResult<(ByteStream, String)> {
         let content_type = self.content_type_for(key).await?;
         let url = self

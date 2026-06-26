@@ -19,6 +19,7 @@ pub type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> +
 pub trait ObjectStore: Send + Sync {
     async fn put(&self, key: &str, content_type: &str, data: Bytes) -> AppResult<()>;
     async fn get(&self, key: &str) -> AppResult<(Bytes, String)>;
+    async fn head(&self, key: &str) -> AppResult<String>;
     async fn stream(&self, key: &str) -> AppResult<(ByteStream, String)>;
 }
 
@@ -40,6 +41,13 @@ impl ObjectStore for Storage {
         match self {
             Self::Local(s) => s.get(key).await,
             Self::R2(s) => s.get(key).await,
+        }
+    }
+
+    async fn head(&self, key: &str) -> AppResult<String> {
+        match self {
+            Self::Local(s) => s.head(key).await,
+            Self::R2(s) => s.head(key).await,
         }
     }
 

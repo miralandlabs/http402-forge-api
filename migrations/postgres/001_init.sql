@@ -1,3 +1,7 @@
+-- http402-forge-api — complete schema (fresh install).
+-- Incremental upgrades: numbered files after 001 (e.g. 002_agent_metadata.sql).
+-- When adding schema: update this file AND add a delta migration for existing DBs.
+
 CREATE TABLE IF NOT EXISTS listings (
     id UUID PRIMARY KEY,
     seller_wallet TEXT NOT NULL,
@@ -13,6 +17,9 @@ CREATE TABLE IF NOT EXISTS listings (
     agent_friendly BOOLEAN NOT NULL DEFAULT FALSE,
     delivery_scheme TEXT NOT NULL DEFAULT 'exact',
     status TEXT NOT NULL DEFAULT 'active',
+    tags TEXT NOT NULL DEFAULT '[]',
+    license TEXT,
+    content_hash TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

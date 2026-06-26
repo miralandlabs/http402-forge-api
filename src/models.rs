@@ -6,6 +6,8 @@ use crate::db::ListingRow;
 
 pub const CATEGORIES: &[&str] = &["art", "text", "audio", "video", "prompt_pack"];
 
+pub const LICENSES: &[&str] = &["personal", "commercial"];
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListingPublic {
@@ -22,6 +24,12 @@ pub struct ListingPublic {
     pub agent_friendly: bool,
     pub delivery_scheme: String,
     pub preview_url: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub license: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_hash: Option<String>,
     pub created_at: chrono::DateTime<Utc>,
 }
 
@@ -41,9 +49,48 @@ impl ListingPublic {
             agent_friendly: row.agent_friendly,
             delivery_scheme: row.delivery_scheme,
             preview_url: format!("{base}/api/v1/listings/{}/preview", row.id),
+            tags: parse_tags_json(&row.tags),
+            license: row.license,
+            content_hash: row.content_hash,
             created_at: row.created_at,
         }
     }
+}
+
+pub fn parse_tags_json(raw: &str) -> Vec<String> {
+    if let Ok(v) = serde_json::from_str::<Vec<String>>(raw) {
+        return v;
+    }
+    Vec::new()
+}
+
+pub fn parse_tags_field(raw: &str) -> Result<Vec<String>, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    if trimmed.starts_with('[') {
+        serde_json::from_str(trimmed).map_err(|e| format!("invalid tags JSON: {e}"))
+    } else {
+        Ok(trimmed
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect())
+    }
+}
+
+pub fn validate_license(license: Option<&str>) -> Result<(), String> {
+    match license {
+        None => Ok(()),
+        Some(l) if LICENSES.contains(&l) => Ok(()),
+        Some(l) => Err(format!("license must be one of: {} (got '{l}')", LICENSES.join(", "))),
+    }
+}
+
+pub fn tags_to_json(tags: &[String]) -> String {
+    serde_json::to_string(tags).unwrap_or_else(|_| "[]".into())
 }
 
 pub fn parse_price_usdc(raw: &str) -> Result<i64, String> {

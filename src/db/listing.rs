@@ -17,5 +17,8 @@ pub struct ListingRow {
     pub agent_friendly: bool,
     pub delivery_scheme: String,
     pub status: String,
+    pub tags: String,
+    pub license: Option<String>,
+    pub content_hash: Option<String>,
     pub created_at: DateTime<Utc>,
 }

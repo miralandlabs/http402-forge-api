@@ -6,6 +6,7 @@ use crate::auth::SellerAuth;
 use crate::config::{AppConfig, ClusterConfig};
 use crate::db::Database;
 use crate::db::SaleRow;
+use crate::rate_limit::RateLimiter;
 use crate::storage::Storage;
 use crate::x402::Facilitator;
 
@@ -17,6 +18,7 @@ pub struct AppState {
     pub facilitator: Facilitator,
     pub seller_auth: SellerAuth,
     pub sale_events: broadcast::Sender<SaleRow>,
+    pub rate_limiter: RateLimiter,
 }
 
 impl AppState {
@@ -37,6 +39,7 @@ impl AppState {
             facilitator,
             seller_auth: SellerAuth::default(),
             sale_events,
+            rate_limiter: RateLimiter::from_env(),
         })
     }
 }

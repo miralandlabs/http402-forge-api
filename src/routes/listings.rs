@@ -15,7 +15,8 @@ use crate::db::ListingFilterBinds;
 use crate::db::ListingRow;
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    parse_price_usdc, text_preview_snippet, validate_category, validate_wallet, ListingPublic,
+    parse_price_usdc, parse_tags_field, tags_to_json, text_preview_snippet, validate_category,
+    validate_license, validate_wallet, ListingPublic,
 };
 use crate::preview::{
     self, generate_media_clip, generate_pdf_first_page_jpeg, is_pdf_content_type,
@@ -39,7 +40,7 @@ pub struct ListQuery {
 }
 
 fn default_sort() -> String {
-    "newest".into()
+    "trending".into()
 }
 
 fn default_limit() -> i64 {
@@ -114,9 +115,10 @@ pub async fn preview(
     Path(id): Path<Uuid>,
 ) -> AppResult<Response> {
     let row = state.db.get_listing(id).await?;
-    let (bytes, content_type) = load_preview_content(&state, &row).await?;
+    let (stream_key, content_type) = resolve_preview_key_and_type(&state, &row).await?;
 
     if content_type.starts_with("text/") || content_type == "application/json" {
+        let (bytes, _) = state.storage.get(&stream_key).await?;
         let text = String::from_utf8_lossy(&bytes);
         let snippet = text_preview_snippet(&text, 500);
         return Ok((
@@ -127,22 +129,34 @@ pub async fn preview(
             .into_response());
     }
 
-    Ok((
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, content_type.as_str())],
-        Body::from(bytes),
-    )
-        .into_response())
+    let (stream, content_type) = state.storage.stream(&stream_key).await?;
+    let body = Body::from_stream(stream.map(|result| result.map_err(axum::Error::new)));
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::ACCEPT_RANGES, "bytes")
+        .body(body)
+        .map_err(|e| AppError::Internal(e.into()))?;
+    Ok(response)
 }
 
-async fn load_preview_content(state: &SharedState, row: &ListingRow) -> AppResult<(Bytes, String)> {
-    let (mut bytes, mut content_type) = state.storage.get(&row.preview_key).await?;
-    let is_legacy_placeholder = content_type.starts_with("text/")
-        && bytes.starts_with(b"Preview unavailable for")
-        && (row.content_type.starts_with("video/") || row.content_type.starts_with("audio/"));
-    if is_legacy_placeholder {
-        (bytes, content_type) = state.storage.get(&row.asset_key).await?;
+async fn resolve_preview_key_and_type(
+    state: &SharedState,
+    row: &ListingRow,
+) -> AppResult<(String, String)> {
+    let content_type = state.storage.head(&row.preview_key).await?;
+    if content_type.starts_with("text/") || content_type == "application/json" {
+        let (bytes, ct) = state.storage.get(&row.preview_key).await?;
+        let is_legacy_placeholder = ct.starts_with("text/")
+            && bytes.starts_with(b"Preview unavailable for")
+            && (row.content_type.starts_with("video/") || row.content_type.starts_with("audio/"));
+        if is_legacy_placeholder {
+            let asset_ct = state.storage.head(&row.asset_key).await?;
+            return Ok((row.asset_key.clone(), asset_ct));
+        }
+        return Ok((row.preview_key.clone(), ct));
     }
+
     let is_legacy_media_asset =
         row.preview_key == row.asset_key && preview::is_media_content_type(&row.content_type);
     if is_legacy_media_asset {
@@ -151,7 +165,7 @@ async fn load_preview_content(state: &SharedState, row: &ListingRow) -> AppResul
             "listing uses full asset as preview; re-upload to generate a clipped preview"
         );
     }
-    Ok((bytes, content_type))
+    Ok((row.preview_key.clone(), content_type))
 }
 
 pub async fn download(
@@ -290,6 +304,9 @@ pub async fn create(
     let mut agent_friendly = false;
     let mut seller_challenge = String::new();
     let mut seller_signature = String::new();
+    let mut tags_raw = String::new();
+    let mut license: Option<String> = None;
+    let mut content_hash: Option<String> = None;
     let mut asset_bytes: Option<(String, Bytes)> = None;
     let mut preview_bytes: Option<(String, Bytes)> = None;
     let mut vault_checked = state.config.skip_seller_vault_check;
@@ -334,6 +351,19 @@ pub async fn create(
             }
             "seller_challenge" => seller_challenge = field.text().await.unwrap_or_default(),
             "seller_signature" => seller_signature = field.text().await.unwrap_or_default(),
+            "tags" => tags_raw = field.text().await.unwrap_or_default(),
+            "license" => {
+                let v = field.text().await.unwrap_or_default();
+                if !v.trim().is_empty() {
+                    license = Some(v.trim().to_string());
+                }
+            }
+            "content_hash" => {
+                let v = field.text().await.unwrap_or_default();
+                if !v.trim().is_empty() {
+                    content_hash = Some(v.trim().to_string());
+                }
+            }
             "asset" => {
                 let filename = field.file_name().unwrap_or("asset.bin").to_string();
                 let ct = field.content_type().map(str::to_string).unwrap_or_else(|| {
@@ -392,8 +422,12 @@ pub async fn create(
     }
     let price_micro =
         parse_price_usdc(&price_usdc).map_err(|m| AppError::validation("price_usdc", m))?;
+    validate_license(license.as_deref()).map_err(|m| AppError::validation("license", m))?;
+    let tags = parse_tags_field(&tags_raw).map_err(|m| AppError::validation("tags", m))?;
     let (asset_ct, asset_data) =
         asset_bytes.ok_or_else(|| AppError::validation("asset", "file required"))?;
+
+    let content_hash = content_hash.or_else(|| Some(sha256_hex(&asset_data)));
 
     if !state.config.skip_seller_auth {
         state.seller_auth.verify_and_consume(
@@ -490,6 +524,9 @@ pub async fn create(
         agent_friendly,
         delivery_scheme: delivery_scheme.into(),
         status: "active".into(),
+        tags: tags_to_json(&tags),
+        license,
+        content_hash,
         created_at: Utc::now(),
     };
 
@@ -530,4 +567,9 @@ fn clip_extension(content_type: &str) -> &'static str {
     } else {
         "mp4"
     }
+}
+
+fn sha256_hex(data: &Bytes) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(data))
 }

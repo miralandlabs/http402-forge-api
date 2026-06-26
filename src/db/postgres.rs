@@ -15,6 +15,7 @@ use crate::error::{AppError, AppResult};
 use tokio_postgres::types::ToSql;
 
 const SCHEMA: &str = include_str!("../../migrations/postgres/001_init.sql");
+const SCHEMA_002: &str = include_str!("../../migrations/postgres/002_agent_metadata.sql");
 
 fn is_supabase_host(database_url: &str) -> bool {
     let lower = database_url.to_ascii_lowercase();
@@ -156,6 +157,10 @@ pub async fn migrate(pool: &Pool) -> AppResult<()> {
         .batch_execute(SCHEMA)
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("postgres migrate: {e}")))?;
+    client
+        .batch_execute(SCHEMA_002)
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("postgres migrate 002: {e}")))?;
     Ok(())
 }
 
@@ -183,8 +188,8 @@ pub async fn insert_listing(pool: &Pool, row: &ListingRow) -> AppResult<()> {
             INSERT INTO listings (
                 id, seller_wallet, display_name, title, description, category,
                 price_micro_usdc, preview_key, asset_key, content_type, byte_size,
-                agent_friendly, delivery_scheme, status, created_at
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+                agent_friendly, delivery_scheme, status, tags, license, content_hash, created_at
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
             "#,
             &[
                 &row.id,
@@ -201,6 +206,9 @@ pub async fn insert_listing(pool: &Pool, row: &ListingRow) -> AppResult<()> {
                 &row.agent_friendly,
                 &row.delivery_scheme,
                 &row.status,
+                &row.tags,
+                &row.license,
+                &row.content_hash,
                 &row.created_at,
             ],
         )
@@ -291,7 +299,9 @@ pub async fn list_listings(
     let order = match sort {
         "price_asc" => "price_micro_usdc ASC, created_at DESC",
         "price_desc" => "price_micro_usdc DESC, created_at DESC",
-        _ => "created_at DESC",
+        "newest" => "created_at DESC",
+        "trending" => "(SELECT COUNT(*) FROM sales s WHERE s.listing_id = listings.id AND s.settled_at >= NOW() - INTERVAL '24 hours') DESC, created_at DESC",
+        _ => "(SELECT COUNT(*) FROM sales s WHERE s.listing_id = listings.id AND s.settled_at >= NOW() - INTERVAL '24 hours') DESC, created_at DESC",
     };
     let (suffix, next_idx) = listing_filter_suffix(binds, 1, false);
     let sql = format!(
@@ -465,6 +475,9 @@ fn map_listing(row: &Row) -> ListingRow {
         agent_friendly: row.get("agent_friendly"),
         delivery_scheme: row.get("delivery_scheme"),
         status: row.get("status"),
+        tags: row.get("tags"),
+        license: row.get("license"),
+        content_hash: row.get("content_hash"),
         created_at: row.get("created_at"),
     }
 }

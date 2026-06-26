@@ -66,6 +66,14 @@ impl ObjectStore for LocalStorage {
         Ok((Bytes::from(data), content_type))
     }
 
+    async fn head(&self, key: &str) -> AppResult<String> {
+        let path = self.path_for(key);
+        if !path.exists() {
+            return Err(AppError::NotFound);
+        }
+        Ok(self.content_type_for(key).await)
+    }
+
     async fn stream(&self, key: &str) -> AppResult<(ByteStream, String)> {
         let path = self.path_for(key);
         if !path.exists() {
