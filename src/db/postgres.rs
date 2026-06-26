@@ -16,6 +16,7 @@ use tokio_postgres::types::ToSql;
 
 const SCHEMA: &str = include_str!("../../migrations/postgres/001_init.sql");
 const SCHEMA_002: &str = include_str!("../../migrations/postgres/002_agent_metadata.sql");
+const SCHEMA_003: &str = include_str!("../../migrations/postgres/003_preview_content_type.sql");
 
 fn is_supabase_host(database_url: &str) -> bool {
     let lower = database_url.to_ascii_lowercase();
@@ -161,6 +162,10 @@ pub async fn migrate(pool: &Pool) -> AppResult<()> {
         .batch_execute(SCHEMA_002)
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("postgres migrate 002: {e}")))?;
+    client
+        .batch_execute(SCHEMA_003)
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("postgres migrate 003: {e}")))?;
     Ok(())
 }
 
@@ -187,9 +192,9 @@ pub async fn insert_listing(pool: &Pool, row: &ListingRow) -> AppResult<()> {
             r#"
             INSERT INTO listings (
                 id, seller_wallet, display_name, title, description, category,
-                price_micro_usdc, preview_key, asset_key, content_type, byte_size,
+                price_micro_usdc, preview_key, preview_content_type, asset_key, content_type, byte_size,
                 agent_friendly, delivery_scheme, status, tags, license, content_hash, created_at
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
             "#,
             &[
                 &row.id,
@@ -200,6 +205,7 @@ pub async fn insert_listing(pool: &Pool, row: &ListingRow) -> AppResult<()> {
                 &row.category,
                 &row.price_micro_usdc,
                 &row.preview_key,
+                &row.preview_content_type,
                 &row.asset_key,
                 &row.content_type,
                 &row.byte_size,
@@ -469,6 +475,7 @@ fn map_listing(row: &Row) -> ListingRow {
         category: row.get("category"),
         price_micro_usdc: row.get("price_micro_usdc"),
         preview_key: row.get("preview_key"),
+        preview_content_type: row.get("preview_content_type"),
         asset_key: row.get("asset_key"),
         content_type: row.get("content_type"),
         byte_size: row.get("byte_size"),
@@ -499,4 +506,43 @@ fn map_sale(row: &Row) -> SaleRow {
         tx_signature: row.get("tx_signature"),
         settled_at: row.get("settled_at"),
     }
+}
+
+pub async fn listings_missing_preview_content_type(
+    pool: &Pool,
+) -> AppResult<Vec<(Uuid, String)>> {
+    let client = pool
+        .get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("postgres conn: {e}")))?;
+    let rows = client
+        .query(
+            "SELECT id, preview_key FROM listings WHERE preview_content_type = ''",
+            &[],
+        )
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("list preview content types: {e}")))?;
+    Ok(rows
+        .iter()
+        .map(|row| (row.get("id"), row.get("preview_key")))
+        .collect())
+}
+
+pub async fn set_preview_content_type(
+    pool: &Pool,
+    id: Uuid,
+    preview_content_type: &str,
+) -> AppResult<()> {
+    let client = pool
+        .get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("postgres conn: {e}")))?;
+    client
+        .execute(
+            "UPDATE listings SET preview_content_type = $2 WHERE id = $1",
+            &[&id, &preview_content_type],
+        )
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("set preview content type: {e}")))?;
+    Ok(())
 }

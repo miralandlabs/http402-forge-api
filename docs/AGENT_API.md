@@ -65,6 +65,7 @@ Response:
       "category": "prompt_pack",
       "priceMicroUsdc": 50000,
       "contentType": "application/json",
+      "previewContentType": "text/plain; charset=utf-8",
       "byteSize": 4096,
       "agentFriendly": true,
       "deliveryScheme": "exact",
@@ -106,7 +107,17 @@ Content-Type: multipart/form-data
 | `license` | no | `personal` or `commercial` |
 | `content_hash` | no | SHA-256 hex of asset; computed automatically if omitted |
 | `asset` | yes | paid download file |
-| `preview` | no | optional; auto JPEG thumbnail for images if omitted |
+| `preview` | no | optional teaser file (any MIME); PDF uploads are rasterized to JPEG for thumbnails; auto-generated if omitted (see below) |
+
+**Preview vs asset:** `contentType` describes the paid **asset**. `previewContentType` describes the free **preview** object (often different — e.g. asset `application/pdf`, preview `image/jpeg`). Clients must render previews from `previewContentType`, not `contentType`.
+
+| Asset (no custom preview) | Auto preview |
+|-----------------------------|--------------|
+| Image | JPEG thumbnail |
+| Text / JSON | Text snippet (~500 chars) |
+| PDF | First page → JPEG (or text placeholder if raster fails) |
+| Audio / video | ~30s clip |
+| Other | Text placeholder |
 
 Dev-only bypass: set `SKIP_SELLER_AUTH=1` on the API (never in production).
 
@@ -196,7 +207,9 @@ GET /api/v1/listings/{id}/preview
 
 Returns a **text snippet** (buffered, max ~500 chars) for `text/*` and `application/json` previews.
 
-For **image, video, and audio** previews, the response is **streamed** (not fully buffered server-side). Clients should use the `previewUrl` from the listing JSON directly as a media `src` URL. Response includes `Accept-Ranges: bytes` for seekable media.
+For **image, video, audio, and PDF** previews, the response is **streamed**. Use `previewContentType` from the listing JSON to choose a renderer (`<img>`, `<video>`, `<audio>`, or `<iframe>` for PDF). The `previewUrl` can be used directly as a media `src`. Response includes `Accept-Ranges: bytes` for seekable media.
+
+Uploaded PDF previews are normally stored as `image/jpeg` (first-page raster). If rasterization fails, the preview may remain `application/pdf`.
 
 Legacy listings that stored a text placeholder for video/audio fall back to streaming the full asset clip.
 

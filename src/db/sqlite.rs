@@ -11,9 +11,10 @@ use crate::error::{AppError, AppResult};
 
 const SCHEMA: &str = include_str!("../../migrations/sqlite/001_init.sql");
 const SCHEMA_002: &str = include_str!("../../migrations/sqlite/002_agent_metadata.sql");
+const SCHEMA_003: &str = include_str!("../../migrations/sqlite/003_preview_content_type.sql");
 
 const LISTING_COLUMNS: &str = "id, seller_wallet, display_name, title, description, category,
-                        price_micro_usdc, preview_key, asset_key, content_type, byte_size,
+                        price_micro_usdc, preview_key, preview_content_type, asset_key, content_type, byte_size,
                         agent_friendly, delivery_scheme, status, tags, license, content_hash, created_at";
 
 fn configure_sqlite_connection(conn: &mut rusqlite::Connection) -> rusqlite::Result<()> {
@@ -96,6 +97,25 @@ pub async fn migrate(pool: &Pool) -> AppResult<()> {
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite interact: {e}")))?
         .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite migrate 002: {e}")))?;
+
+    let sql3 = SCHEMA_003.to_string();
+    pool.get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite conn: {e}")))?
+        .interact(move |conn| {
+            for stmt in sql3.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+                if let Err(e) = conn.execute(stmt, []) {
+                    let msg = e.to_string();
+                    if !msg.contains("duplicate column") {
+                        return Err(e);
+                    }
+                }
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite interact: {e}")))?
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite migrate 003: {e}")))?;
     Ok(())
 }
 
@@ -126,9 +146,9 @@ pub async fn insert_listing(pool: &Pool, row: &ListingRow) -> AppResult<()> {
                 r#"
                 INSERT INTO listings (
                     id, seller_wallet, display_name, title, description, category,
-                    price_micro_usdc, preview_key, asset_key, content_type, byte_size,
+                    price_micro_usdc, preview_key, preview_content_type, asset_key, content_type, byte_size,
                     agent_friendly, delivery_scheme, status, tags, license, content_hash, created_at
-                ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)
+                ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)
                 "#,
                 params![
                     row.id.to_string(),
@@ -139,6 +159,7 @@ pub async fn insert_listing(pool: &Pool, row: &ListingRow) -> AppResult<()> {
                     row.category,
                     row.price_micro_usdc,
                     row.preview_key,
+                    row.preview_content_type,
                     row.asset_key,
                     row.content_type,
                     row.byte_size,
@@ -460,16 +481,17 @@ fn map_listing(row: &Row<'_>) -> rusqlite::Result<ListingRow> {
         category: row.get(5)?,
         price_micro_usdc: row.get(6)?,
         preview_key: row.get(7)?,
-        asset_key: row.get(8)?,
-        content_type: row.get(9)?,
-        byte_size: row.get(10)?,
-        agent_friendly: row.get::<_, i32>(11)? != 0,
-        delivery_scheme: row.get(12)?,
-        status: row.get(13)?,
-        tags: row.get(14)?,
-        license: row.get(15)?,
-        content_hash: row.get(16)?,
-        created_at: parse_datetime(row.get::<_, String>(17)?)?,
+        preview_content_type: row.get(8)?,
+        asset_key: row.get(9)?,
+        content_type: row.get(10)?,
+        byte_size: row.get(11)?,
+        agent_friendly: row.get::<_, i32>(12)? != 0,
+        delivery_scheme: row.get(13)?,
+        status: row.get(14)?,
+        tags: row.get(15)?,
+        license: row.get(16)?,
+        content_hash: row.get(17)?,
+        created_at: parse_datetime(row.get::<_, String>(18)?)?,
     })
 }
 
@@ -504,4 +526,48 @@ fn parse_datetime(raw: String) -> rusqlite::Result<DateTime<Utc>> {
                 .map(|ndt| ndt.and_utc())
         })
         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+}
+
+pub async fn listings_missing_preview_content_type(
+    pool: &Pool,
+) -> AppResult<Vec<(Uuid, String)>> {
+    let sql = "SELECT id, preview_key FROM listings WHERE preview_content_type = ''".to_string();
+    pool.get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite conn: {e}")))?
+        .interact(move |conn| -> rusqlite::Result<Vec<(Uuid, String)>> {
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    parse_uuid(row.get::<_, String>(0)?)?,
+                    row.get::<_, String>(1)?,
+                ))
+            })?;
+            rows.collect()
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite interact: {e}")))?
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("list preview content types: {e}")))
+}
+
+pub async fn set_preview_content_type(
+    pool: &Pool,
+    id: Uuid,
+    preview_content_type: &str,
+) -> AppResult<()> {
+    let id = id.to_string();
+    let preview_content_type = preview_content_type.to_string();
+    pool.get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite conn: {e}")))?
+        .interact(move |conn| {
+            conn.execute(
+                "UPDATE listings SET preview_content_type = ?2 WHERE id = ?1",
+                params![id, preview_content_type],
+            )
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite interact: {e}")))?
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("set preview content type: {e}")))?;
+    Ok(())
 }

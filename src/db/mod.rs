@@ -220,4 +220,26 @@ impl Database {
             DbBackend::Sqlite(pool) => sqlite::hottest_listings_24h(pool).await,
         }
     }
+
+    pub async fn listings_missing_preview_content_type(&self) -> AppResult<Vec<(uuid::Uuid, String)>> {
+        match &self.backend {
+            DbBackend::Postgres(pool) => postgres::listings_missing_preview_content_type(pool).await,
+            DbBackend::Sqlite(pool) => sqlite::listings_missing_preview_content_type(pool).await,
+        }
+    }
+
+    pub async fn set_preview_content_type(
+        &self,
+        id: uuid::Uuid,
+        preview_content_type: &str,
+    ) -> AppResult<()> {
+        match &self.backend {
+            DbBackend::Postgres(pool) => {
+                postgres::set_preview_content_type(pool, id, preview_content_type).await
+            }
+            DbBackend::Sqlite(pool) => {
+                sqlite::set_preview_content_type(pool, id, preview_content_type).await
+            }
+        }
+    }
 }

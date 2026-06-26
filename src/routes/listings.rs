@@ -448,60 +448,8 @@ pub async fn create(
         .put(&asset_key, &asset_ct, asset_data.clone())
         .await?;
 
-    let (preview_key, _preview_ct) = if let Some((pct, pdata)) = preview_bytes {
-        let key = object_key("previews", id, "preview");
-        state.storage.put(&key, &pct, pdata).await?;
-        (key, pct)
-    } else if asset_ct.starts_with("image/") {
-        let key = object_key("previews", id, "preview.jpg");
-        let preview = generate_image_preview(&asset_data, &asset_ct)?;
-        state
-            .storage
-            .put(&key, "image/jpeg", preview.clone())
-            .await?;
-        (key, "image/jpeg".to_string())
-    } else if asset_ct.starts_with("text/") || asset_ct == "application/json" {
-        let snippet = text_preview_snippet(&String::from_utf8_lossy(&asset_data), 500);
-        let key = object_key("previews", id, "preview.txt");
-        let bytes = Bytes::from(snippet);
-        state
-            .storage
-            .put(&key, "text/plain; charset=utf-8", bytes)
-            .await?;
-        (key, "text/plain; charset=utf-8".to_string())
-    } else if is_pdf_content_type(&asset_ct) {
-        let key = object_key("previews", id, "preview.jpg");
-        match generate_pdf_first_page_jpeg(&asset_data, &state.config).await {
-            Ok(preview) => {
-                state
-                    .storage
-                    .put(&key, "image/jpeg", preview.clone())
-                    .await?;
-                (key, "image/jpeg".to_string())
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "PDF auto-preview failed; listing will use text placeholder");
-                let placeholder_key = object_key("previews", id, "placeholder.txt");
-                let bytes = Bytes::from(format!("Preview unavailable for {asset_ct}"));
-                state
-                    .storage
-                    .put(&placeholder_key, "text/plain", bytes)
-                    .await?;
-                (placeholder_key, "text/plain".to_string())
-            }
-        }
-    } else if asset_ct.starts_with("video/") || asset_ct.starts_with("audio/") {
-        let (clip, clip_ct) = generate_media_clip(&asset_data, &asset_ct, &state.config).await?;
-        let ext = clip_extension(&clip_ct);
-        let key = object_key("previews", id, &format!("preview.{ext}"));
-        state.storage.put(&key, &clip_ct, clip).await?;
-        (key, clip_ct)
-    } else {
-        let key = object_key("previews", id, "placeholder.txt");
-        let bytes = Bytes::from(format!("Preview unavailable for {asset_ct}"));
-        state.storage.put(&key, "text/plain", bytes).await?;
-        (key, "text/plain".to_string())
-    };
+    let (preview_key, preview_content_type) =
+        store_listing_preview(&state, id, &asset_ct, &asset_data, preview_bytes).await?;
 
     let delivery_scheme = if asset_data.len() as u64 >= state.config.escrow_size_threshold {
         "escrow"
@@ -518,6 +466,7 @@ pub async fn create(
         category,
         price_micro_usdc: price_micro,
         preview_key,
+        preview_content_type,
         asset_key,
         content_type: asset_ct,
         byte_size: asset_data.len() as i64,
@@ -567,6 +516,103 @@ fn clip_extension(content_type: &str) -> &'static str {
     } else {
         "mp4"
     }
+}
+
+async fn store_listing_preview(
+    state: &SharedState,
+    id: Uuid,
+    asset_ct: &str,
+    asset_data: &Bytes,
+    preview_bytes: Option<(String, Bytes)>,
+) -> AppResult<(String, String)> {
+    if let Some((pct, pdata)) = preview_bytes {
+        return store_uploaded_preview(state, id, &pct, &pdata).await;
+    }
+    if asset_ct.starts_with("image/") {
+        let key = object_key("previews", id, "preview.jpg");
+        let preview = generate_image_preview(asset_data, asset_ct)?;
+        state
+            .storage
+            .put(&key, "image/jpeg", preview.clone())
+            .await?;
+        return Ok((key, "image/jpeg".to_string()));
+    }
+    if asset_ct.starts_with("text/") || asset_ct == "application/json" {
+        let snippet = text_preview_snippet(&String::from_utf8_lossy(asset_data), 500);
+        let key = object_key("previews", id, "preview.txt");
+        let bytes = Bytes::from(snippet);
+        state
+            .storage
+            .put(&key, "text/plain; charset=utf-8", bytes)
+            .await?;
+        return Ok((key, "text/plain; charset=utf-8".to_string()));
+    }
+    if is_pdf_content_type(asset_ct) {
+        let key = object_key("previews", id, "preview.jpg");
+        match generate_pdf_first_page_jpeg(asset_data, &state.config).await {
+            Ok(preview) => {
+                state
+                    .storage
+                    .put(&key, "image/jpeg", preview.clone())
+                    .await?;
+                Ok((key, "image/jpeg".to_string()))
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "PDF auto-preview failed; listing will use text placeholder");
+                let placeholder_key = object_key("previews", id, "placeholder.txt");
+                let bytes = Bytes::from(format!("Preview unavailable for {asset_ct}"));
+                state
+                    .storage
+                    .put(&placeholder_key, "text/plain", bytes)
+                    .await?;
+                Ok((placeholder_key, "text/plain".to_string()))
+            }
+        }
+    } else if asset_ct.starts_with("video/") || asset_ct.starts_with("audio/") {
+        let (clip, clip_ct) = generate_media_clip(asset_data, asset_ct, &state.config).await?;
+        let ext = clip_extension(&clip_ct);
+        let key = object_key("previews", id, &format!("preview.{ext}"));
+        state.storage.put(&key, &clip_ct, clip).await?;
+        Ok((key, clip_ct))
+    } else {
+        let key = object_key("previews", id, "placeholder.txt");
+        let bytes = Bytes::from(format!("Preview unavailable for {asset_ct}"));
+        state.storage.put(&key, "text/plain", bytes).await?;
+        Ok((key, "text/plain".to_string()))
+    }
+}
+
+async fn store_uploaded_preview(
+    state: &SharedState,
+    id: Uuid,
+    preview_ct: &str,
+    preview_data: &Bytes,
+) -> AppResult<(String, String)> {
+    if is_pdf_content_type(preview_ct) {
+        let key = object_key("previews", id, "preview.jpg");
+        match generate_pdf_first_page_jpeg(preview_data, &state.config).await {
+            Ok(jpeg) => {
+                state.storage.put(&key, "image/jpeg", jpeg).await?;
+                return Ok((key, "image/jpeg".to_string()));
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Uploaded PDF preview could not be rasterized; storing PDF for inline embed"
+                );
+                let key = object_key("previews", id, "preview.pdf");
+                state.storage.put(&key, preview_ct, preview_data.clone()).await?;
+                return Ok((key, preview_ct.to_string()));
+            }
+        }
+    }
+
+    let key = object_key("previews", id, "preview");
+    state
+        .storage
+        .put(&key, preview_ct, preview_data.clone())
+        .await?;
+    Ok((key, preview_ct.to_string()))
 }
 
 fn sha256_hex(data: &Bytes) -> String {

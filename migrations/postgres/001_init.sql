@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS listings (
     category TEXT NOT NULL,
     price_micro_usdc BIGINT NOT NULL,
     preview_key TEXT NOT NULL,
+    preview_content_type TEXT NOT NULL DEFAULT '',
     asset_key TEXT NOT NULL,
     content_type TEXT NOT NULL,
     byte_size BIGINT NOT NULL,

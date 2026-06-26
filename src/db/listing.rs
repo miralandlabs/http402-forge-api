@@ -11,6 +11,7 @@ pub struct ListingRow {
     pub category: String,
     pub price_micro_usdc: i64,
     pub preview_key: String,
+    pub preview_content_type: String,
     pub asset_key: String,
     pub content_type: String,
     pub byte_size: i64,
