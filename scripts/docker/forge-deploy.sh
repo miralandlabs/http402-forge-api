@@ -220,17 +220,25 @@ probe_delist_route() {
     local url="http://127.0.0.1:${HEALTH_PORT}/api/v1/seller/delist-challenge"
     url+="?seller_wallet=buyA5hR1Z9KtHQRBTmLkjsFfjAabDwdZtrRC6edqxAJ"
     url+="&listing_id=00000000-0000-0000-0000-000000000001"
-    local body code
-    body="$(curl -fsS "$url" 2>/dev/null || true)"
-    code="$(curl -sS -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || echo 000)"
-    if [[ "$code" == "404" && -n "$body" ]]; then
-        echo "[deploy] delist-challenge route registered"
-        return 0
-    fi
-    if [[ "$code" == "403" || "$code" == "422" ]]; then
-        echo "[deploy] delist-challenge route registered (HTTP ${code})"
-        return 0
-    fi
+    local attempt body code
+    for attempt in 1 2 3 4 5; do
+        body="$(curl -sS "$url" 2>/dev/null || true)"
+        code="$(curl -sS -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || echo 000)"
+        if [[ "$code" == "200" ]]; then
+            echo "[deploy] delist-challenge route registered"
+            return 0
+        fi
+        if [[ "$code" == "404" && -n "$body" ]]; then
+            echo "[deploy] delist-challenge route registered"
+            return 0
+        fi
+        if [[ "$code" == "403" || "$code" == "422" ]]; then
+            echo "[deploy] delist-challenge route registered (HTTP ${code})"
+            return 0
+        fi
+        echo "[deploy] delist-challenge probe attempt ${attempt}/5 (HTTP ${code}, body len=${#body})"
+        sleep 2
+    done
     echo "[deploy] ERROR: delist-challenge probe failed (HTTP ${code}, body len=${#body})" >&2
     echo "[deploy] hint: stale process on port ${HEALTH_PORT} or old image — re-run with --no-cache" >&2
     return 1
