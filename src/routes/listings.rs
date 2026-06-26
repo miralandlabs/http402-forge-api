@@ -185,12 +185,17 @@ pub async fn download(
     let path = format!("/api/v1/listings/{id}/download");
     let payment = PaymentGate::check_download_active_or_paid(&state, &headers, &row, &path).await?;
 
+    let mode = if payment.already_paid {
+        "retry_same_payment_proof"
+    } else {
+        "new_settlement"
+    };
     tracing::info!(
         listing_id = %id,
-        payer = %payment.payer_wallet,
-        already_paid = payment.already_paid,
-        byte_size = row.byte_size,
-        "download authorized"
+        buyer = %payment.payer_wallet,
+        bytes = row.byte_size,
+        mode,
+        "paid download"
     );
 
     let sale_row = if payment.already_paid {

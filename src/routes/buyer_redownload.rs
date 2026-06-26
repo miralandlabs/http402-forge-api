@@ -115,8 +115,8 @@ pub async fn redownload(
         listing_id = %listing_id,
         buyer = %buyer_wallet,
         sale_id = %sale.id,
-        byte_size = row.byte_size,
-        "wallet redownload authorized"
+        bytes = row.byte_size,
+        "wallet redownload"
     );
 
     build_asset_download_response(&state, &row, Some(&sale), None).await
