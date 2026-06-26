@@ -138,6 +138,17 @@ detect_health_port() {
     HEALTH_PORT=$([[ "$CLUSTER" == devnet ]] && echo 8092 || echo 8093)
 }
 
+sync_systemd_unit() {
+    local unit_file="${SCRIPT_DIR}/${UNIT}.service"
+    [[ -f "$unit_file" ]] || return 0
+    if cmp -s "$unit_file" "/etc/systemd/system/${SERVICE}" 2>/dev/null; then
+        return 0
+    fi
+    echo "[deploy] updating systemd unit ${SERVICE} from repo"
+    install -m 0644 "$unit_file" "/etc/systemd/system/${SERVICE}"
+    systemctl daemon-reload
+}
+
 prepare_service_start() {
     echo "[deploy] stopping ${SERVICE} and removing ${CONTAINER_NAME}…"
     systemctl stop "$SERVICE" 2>/dev/null || true
@@ -158,6 +169,11 @@ ensure_health_port_free() {
     ss -ltnp "sport = :$port" 2>&1 || true
     if command -v fuser >/dev/null 2>&1; then
         fuser -k "${port}/tcp" >/dev/null 2>&1 || true
+        sleep 1
+    fi
+    if pgrep -x http402-forge-api >/dev/null 2>&1; then
+        echo "[deploy] stopping stray http402-forge-api host process…" >&2
+        pkill -x http402-forge-api 2>/dev/null || true
         sleep 1
     fi
     if ss -ltn "sport = :$port" 2>/dev/null | grep -q LISTEN; then
@@ -271,6 +287,7 @@ if [[ "$ROLLBACK" -eq 1 ]]; then
     fi
     preflight_database
     restore_previous_as_current
+    sync_systemd_unit
     prepare_service_start
     systemctl restart "$SERVICE"
     if probe_health; then
@@ -311,6 +328,7 @@ else
 fi
 
 promote_sha_to_current "${IMAGE_SHA}"
+sync_systemd_unit
 prepare_service_start
 systemctl restart "$SERVICE"
 echo "[deploy] restarted ${SERVICE}; probing /health on port ${HEALTH_PORT}…"
@@ -330,6 +348,7 @@ echo "[deploy] /health did not flip to healthy within ${HEALTH_TIMEOUT}s" >&2
 show_deploy_failure
 echo "[deploy] auto-rolling back to :previous (if available)…" >&2
 if restore_previous_as_current; then
+    sync_systemd_unit
     prepare_service_start
     systemctl restart "$SERVICE"
     if probe_health; then
