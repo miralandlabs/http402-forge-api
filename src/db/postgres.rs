@@ -225,6 +225,34 @@ pub async fn get_listing(pool: &Pool, id: Uuid) -> AppResult<ListingRow> {
     Ok(map_listing(&row))
 }
 
+pub async fn get_listing_any(pool: &Pool, id: Uuid) -> AppResult<ListingRow> {
+    let client = pool
+        .get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("postgres conn: {e}")))?;
+    let row = client
+        .query_opt("SELECT * FROM listings WHERE id = $1", &[&id])
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("get listing: {e}")))?
+        .ok_or(AppError::NotFound)?;
+    Ok(map_listing(&row))
+}
+
+pub async fn soft_delist_listing(pool: &Pool, id: Uuid, seller_wallet: &str) -> AppResult<bool> {
+    let client = pool
+        .get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("postgres conn: {e}")))?;
+    let n = client
+        .execute(
+            "UPDATE listings SET status = 'removed' WHERE id = $1 AND seller_wallet = $2 AND status = 'active'",
+            &[&id, &seller_wallet],
+        )
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("soft delist: {e}")))?;
+    Ok(n > 0)
+}
+
 pub async fn count_listings(pool: &Pool, binds: &ListingFilterBinds) -> AppResult<i64> {
     let (suffix, _) = listing_filter_suffix(binds, 1, false);
     let sql = format!("SELECT COUNT(*) FROM listings WHERE status = 'active'{suffix}");

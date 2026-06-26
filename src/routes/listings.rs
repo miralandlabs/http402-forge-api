@@ -158,9 +158,9 @@ pub async fn download(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> AppResult<Response> {
-    let row = state.db.get_listing(id).await?;
+    let row = state.db.get_listing_any(id).await?;
     let path = format!("/api/v1/listings/{id}/download");
-    let payment = PaymentGate::check_download(&state, &headers, &row, &path).await?;
+    let payment = PaymentGate::check_download_active_or_paid(&state, &headers, &row, &path).await?;
 
     if !payment.already_paid {
         record_sale(&state, &row, &payment).await?;
@@ -182,6 +182,45 @@ pub async fn download(
         response = PaymentGate::attach_payment_response(response, &payment.settle_proof);
     }
     Ok(response)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DelistRequest {
+    pub seller_wallet: String,
+    pub seller_challenge: String,
+    pub seller_signature: String,
+}
+
+pub async fn delist(
+    State(state): State<SharedState>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<DelistRequest>,
+) -> AppResult<StatusCode> {
+    validate_wallet(&body.seller_wallet).map_err(|m| AppError::validation("seller_wallet", m))?;
+
+    if !state.config.skip_seller_auth {
+        state.seller_auth.verify_and_consume(
+            &body.seller_wallet,
+            &body.seller_challenge,
+            &body.seller_signature,
+        )?;
+        let challenge_listing = crate::auth::parse_delist_listing_id(&body.seller_challenge)
+            .ok_or_else(|| AppError::Forbidden("invalid delist challenge".into()))?;
+        if challenge_listing != id {
+            return Err(AppError::Forbidden(
+                "delist challenge listing mismatch".into(),
+            ));
+        }
+    }
+
+    let removed = state
+        .db
+        .soft_delist_listing(id, &body.seller_wallet)
+        .await?;
+    if !removed {
+        return Err(AppError::NotFound);
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn record_sale(

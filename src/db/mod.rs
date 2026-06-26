@@ -98,6 +98,26 @@ impl Database {
         }
     }
 
+    pub async fn get_listing_any(&self, id: uuid::Uuid) -> AppResult<ListingRow> {
+        match &self.backend {
+            DbBackend::Postgres(pool) => postgres::get_listing_any(pool, id).await,
+            DbBackend::Sqlite(pool) => sqlite::get_listing_any(pool, id).await,
+        }
+    }
+
+    pub async fn soft_delist_listing(
+        &self,
+        id: uuid::Uuid,
+        seller_wallet: &str,
+    ) -> AppResult<bool> {
+        match &self.backend {
+            DbBackend::Postgres(pool) => {
+                postgres::soft_delist_listing(pool, id, seller_wallet).await
+            }
+            DbBackend::Sqlite(pool) => sqlite::soft_delist_listing(pool, id, seller_wallet).await,
+        }
+    }
+
     pub async fn count_listings(&self, filters: &ListingFilterBinds) -> AppResult<i64> {
         match &self.backend {
             DbBackend::Postgres(pool) => postgres::count_listings(pool, filters).await,

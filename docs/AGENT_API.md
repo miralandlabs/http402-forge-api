@@ -1,6 +1,6 @@
 # Forge Agent API
 
-Machine-readable listing and purchase API. Same routes as the human UI.
+Machine-readable listing, purchase, and lifecycle API for autonomous agents. Human UI uses the same routes.
 
 **Wire format:** all JSON responses use **camelCase** keys (e.g. `priceMicroUsdc`, `sellerWallet`).
 
@@ -15,6 +15,7 @@ Forge is a **catalog + 402 checkout** service. OpenAPI describes API *shape*; th
 2. Inspect listing  GET /api/v1/listings/{id}
 3. Sample (free)    GET /api/v1/listings/{id}/preview
 4. Purchase         GET /api/v1/listings/{id}/download  → 402 → sign → retry
+5. Delist (owner)   GET /api/v1/seller/delist-challenge → sign → DELETE /api/v1/listings/{id}
 ```
 
 **Stable product ID:** listing UUID (`id`). Store that — not OpenAPI paths or slug URLs.
@@ -30,6 +31,8 @@ First request returns **402** with `accepts[]`. Build and sign via pr402, then r
 **Marketplace entry (x402):** `GET /.well-known/x402-resources.json` on this host describes the download URL *pattern* (`{id}` placeholder). It is not a full SKU manifest — use `GET /listings` to enumerate inventory.
 
 **Prompt / agent-oriented assets:** filter with `agent_friendly=true` and `category=prompt_pack`.
+
+**Listing lifecycle:** only `status = active` listings appear in catalog, detail, and preview. Owners soft-delist with seller-signed `DELETE` (`status = removed`). R2 objects are retained; buyers who already paid may re-download with the same `PAYMENT-SIGNATURE` idempotency key.
 
 ## List listings
 
@@ -101,6 +104,47 @@ Content-Type: multipart/form-data
 
 Dev-only bypass: set `SKIP_SELLER_AUTH=1` on the API (never in production).
 
+## Delist listing (agent)
+
+Soft-remove a listing from the public catalog. Same **wallet ownership proof** as create — there is no separate agent session. An agent that listed under wallet `W` must sign as `W`; it cannot delist another seller's listing.
+
+1. `GET /api/v1/seller/delist-challenge?seller_wallet={pubkey}&listing_id={uuid}` → `{ "message", "expiresAt" }`
+   - Returns **403** if `seller_wallet` is not the listing owner.
+   - Returns **404** if the listing is not active (already delisted or unknown id).
+2. Sign `message` with the wallet's ed25519 key (Solana `signMessage`). The challenge binds wallet + listing id (`http402-forge:delist-listing:v1` prefix).
+3. `DELETE /api/v1/listings/{id}` with JSON body:
+
+```http
+DELETE /api/v1/listings/{id}
+Content-Type: application/json
+
+{
+  "seller_wallet": "{pubkey}",
+  "seller_challenge": "{exact message from step 1}",
+  "seller_signature": "{base64 ed25519 signature}"
+}
+```
+
+| Field | Required | Notes |
+|-------|----------|-------|
+| `seller_wallet` | yes | Must match listing owner and signed challenge |
+| `seller_challenge` | yes | Exact `message` from delist-challenge (includes `listing:{uuid}`) |
+| `seller_signature` | yes | Base64 ed25519 signature |
+
+**Success:** `204 No Content`. Listing `status` becomes `removed`.
+
+**Effects:**
+
+| Route | After delist |
+|-------|----------------|
+| `GET /listings`, `GET /listings/{id}`, `GET …/preview` | **404** (hidden from catalog) |
+| `GET …/download` without prior payment | **404** (no new purchases) |
+| `GET …/download` with prior `PAYMENT-SIGNATURE` (idempotency hit) | **200** — file stream; buyers keep access |
+
+Storage objects (R2/local) are **not** deleted immediately.
+
+Dev-only bypass: `SKIP_SELLER_AUTH=1` skips signature verification but still requires `seller_wallet` to match the listing owner in the database update.
+
 ## Seller vault (required before listing)
 
 Sellers must have an activated pr402 SplitVault unless `SKIP_SELLER_VAULT_CHECK=1` (local dev only).
@@ -128,13 +172,15 @@ When posting multipart listings, send `seller_wallet` before `asset` / `preview`
 GET /api/v1/listings/{id}/download
 ```
 
-1. First request → **402** JSON (`x402Version`, `resource`, `accepts`, `extensions`).
+1. First request → **402** JSON (`x402Version`, `resource`, `accepts`, `extensions`) for **active** listings.
 2. Build tx: `POST {facilitator}/build-exact-payment-tx` with `accepted` line from `accepts[]`.
 3. Sign transaction locally.
 4. Retry with header `PAYMENT-SIGNATURE: {base64 proof}`.
 5. **200** → response body is the asset file stream (`Content-Type` from listing).
 
-Idempotency: same payment signature returns the file without double-charging (checked via `payments` table).
+**Removed listings:** no **402** — new buyers get **404**. Agents with a stored payment proof retry step 4 with the same `PAYMENT-SIGNATURE`; idempotency returns **200** without charging again.
+
+Idempotency: same payment signature returns the file without double-charging (checked via `payments` table). Works for both active and removed listings.
 
 ## Preview
 

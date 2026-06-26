@@ -24,6 +24,7 @@ fn cors_layer(origins: &[String]) -> CorsLayer {
         .allow_methods(AllowMethods::list([
             axum::http::Method::GET,
             axum::http::Method::POST,
+            axum::http::Method::DELETE,
             axum::http::Method::OPTIONS,
         ]))
         .allow_headers(AllowHeaders::list([
@@ -40,13 +41,20 @@ pub fn router(state: SharedState) -> Router {
     Router::new()
         .route("/health", get(health::health))
         .route("/api/v1/seller/challenge", get(seller::challenge))
+        .route(
+            "/api/v1/seller/delist-challenge",
+            get(seller::delist_challenge),
+        )
         .route("/api/v1/seller/status", get(seller::status))
         .route("/api/v1/seller/provision-tx", post(seller::provision_tx))
         .route(
             "/api/v1/listings",
             get(listings::list).post(listings::create),
         )
-        .route("/api/v1/listings/{id}", get(listings::get_one))
+        .route(
+            "/api/v1/listings/{id}",
+            get(listings::get_one).delete(listings::delist),
+        )
         .route("/api/v1/listings/{id}/preview", get(listings::preview))
         .route("/api/v1/listings/{id}/download", get(listings::download))
         .route("/api/v1/leaderboards", get(leaderboards::leaderboards))

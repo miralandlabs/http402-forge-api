@@ -155,6 +155,49 @@ pub async fn get_listing(pool: &Pool, id: Uuid) -> AppResult<ListingRow> {
         .ok_or(AppError::NotFound)
 }
 
+pub async fn get_listing_any(pool: &Pool, id: Uuid) -> AppResult<ListingRow> {
+    let id = id.to_string();
+    pool.get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite conn: {e}")))?
+        .interact(move |conn| -> rusqlite::Result<Option<ListingRow>> {
+            let mut stmt = conn.prepare(
+                "SELECT id, seller_wallet, display_name, title, description, category,
+                        price_micro_usdc, preview_key, asset_key, content_type, byte_size,
+                        agent_friendly, delivery_scheme, status, created_at
+                 FROM listings WHERE id = ?1",
+            )?;
+            let mut rows = stmt.query(params![id])?;
+            if let Some(row) = rows.next()? {
+                return Ok(Some(map_listing(row)?));
+            }
+            Ok(None)
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite interact: {e}")))?
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("get listing: {e}")))?
+        .ok_or(AppError::NotFound)
+}
+
+pub async fn soft_delist_listing(pool: &Pool, id: Uuid, seller_wallet: &str) -> AppResult<bool> {
+    let id = id.to_string();
+    let seller_wallet = seller_wallet.to_string();
+    let n = pool
+        .get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite conn: {e}")))?
+        .interact(move |conn| {
+            conn.execute(
+                "UPDATE listings SET status = 'removed' WHERE id = ?1 AND seller_wallet = ?2 AND status = 'active'",
+                params![id, seller_wallet],
+            )
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite interact: {e}")))?
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("soft delist: {e}")))?;
+    Ok(n > 0)
+}
+
 fn listing_filter_values(
     binds: &ListingFilterBinds,
     limit: Option<i64>,
