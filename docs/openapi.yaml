@@ -425,6 +425,8 @@ paths:
         Successful paid download includes response header **X-Forge-Sale-Id** (sale UUID)
         for purchase-linked feedback. Removed listings return 404 for new purchases.
         Buyers with a prior payment proof may retry with the same PAYMENT-SIGNATURE header (idempotency).
+        After a failed transfer, buyers may also use GET …/redownload with a wallet-signed challenge
+        (see /api/v1/buyer/redownload-challenge).
       parameters:
         - in: path
           name: id
@@ -455,6 +457,80 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorBody" }
         "403":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorBody" }
+  /api/v1/listings/{id}/redownload:
+    get:
+      summary: Re-download after prior purchase (wallet-signed)
+      description: |
+        Streams the paid asset when the buyer wallet has a recorded sale for this listing.
+        Obtain a one-time challenge from GET /api/v1/buyer/redownload-challenge, sign it with
+        the buyer wallet, then call this route with base64-encoded UTF-8 headers:
+        **X-Forge-Buyer-Wallet**, **X-Forge-Buyer-Challenge** (message), **X-Forge-Buyer-Signature**.
+        No additional payment is taken.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+        - in: header
+          name: X-Forge-Buyer-Wallet
+          required: true
+          schema: { type: string }
+        - in: header
+          name: X-Forge-Buyer-Challenge
+          required: true
+          schema: { type: string }
+          description: Base64-encoded UTF-8 challenge message
+        - in: header
+          name: X-Forge-Buyer-Signature
+          required: true
+          schema: { type: string }
+          description: Base64 ed25519 signature of the challenge message
+      responses:
+        "200":
+          description: Asset file stream
+          headers:
+            X-Forge-Sale-Id:
+              schema: { type: string, format: uuid }
+        "403":
+          description: Invalid or expired challenge
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorBody" }
+        "404":
+          description: No purchase found for this wallet on this listing
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorBody" }
+  /api/v1/buyer/redownload-challenge:
+    get:
+      summary: Issue a one-time challenge to re-download a prior purchase
+      parameters:
+        - in: query
+          name: buyer_wallet
+          required: true
+          schema: { type: string }
+        - in: query
+          name: listing_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Challenge message to sign with buyer wallet
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SellerChallenge" }
+                  - type: object
+                    properties:
+                      saleId:
+                        type: string
+                        format: uuid
+        "404":
+          description: No purchase found for this wallet on this listing
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorBody" }

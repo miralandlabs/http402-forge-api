@@ -1,4 +1,5 @@
 mod events;
+mod buyer_redownload;
 mod health;
 mod leaderboards;
 mod listings;
@@ -36,6 +37,9 @@ fn cors_layer(origins: &[String]) -> CorsLayer {
             axum::http::header::CONTENT_TYPE,
             axum::http::header::AUTHORIZATION,
             axum::http::HeaderName::from_static("payment-signature"),
+            axum::http::HeaderName::from_static("x-forge-buyer-wallet"),
+            axum::http::HeaderName::from_static("x-forge-buyer-challenge"),
+            axum::http::HeaderName::from_static("x-forge-buyer-signature"),
         ]))
         .expose_headers(ExposeHeaders::list([
             axum::http::HeaderName::from_static("x-forge-sale-id"),
@@ -54,6 +58,10 @@ pub fn router(state: SharedState) -> Router {
         )
         .route("/api/v1/listings/{id}/preview", get(listings::preview))
         .route("/api/v1/listings/{id}/download", get(listings::download))
+        .route(
+            "/api/v1/listings/{id}/redownload",
+            get(buyer_redownload::redownload),
+        )
         .layer(middleware::from_fn_with_state(state.clone(), rate_limit_middleware))
         .with_state(state.clone());
 
@@ -67,6 +75,10 @@ pub fn router(state: SharedState) -> Router {
         .route(
             "/api/v1/buyer/feedback-challenge",
             get(sale_feedback::feedback_challenge),
+        )
+        .route(
+            "/api/v1/buyer/redownload-challenge",
+            get(buyer_redownload::redownload_challenge),
         )
         .route("/api/v1/seller/status", get(seller::status))
         .route("/api/v1/seller/provision-tx", post(seller::provision_tx))

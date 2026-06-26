@@ -669,6 +669,35 @@ pub async fn find_sale_by_payment(
         .map_err(|e| AppError::Internal(anyhow::anyhow!("find sale: {e}")))
 }
 
+pub async fn find_buyer_sale_for_listing(
+    pool: &Pool,
+    listing_id: Uuid,
+    buyer_wallet: &str,
+) -> AppResult<Option<SaleRow>> {
+    let listing_id = listing_id.to_string();
+    let buyer_wallet = buyer_wallet.to_string();
+    pool.get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite conn: {e}")))?
+        .interact(move |conn| -> rusqlite::Result<Option<SaleRow>> {
+            let mut stmt = conn.prepare(
+                "SELECT id, listing_id, seller_wallet, buyer_wallet, amount_micro_usdc, tx_signature, settled_at
+                 FROM sales
+                 WHERE listing_id = ?1 AND buyer_wallet = ?2
+                 ORDER BY settled_at DESC
+                 LIMIT 1",
+            )?;
+            let mut rows = stmt.query(params![listing_id, buyer_wallet])?;
+            if let Some(row) = rows.next()? {
+                return Ok(Some(map_sale(row)?));
+            }
+            Ok(None)
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite interact: {e}")))?
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("find buyer sale: {e}")))
+}
+
 pub async fn insert_sale_feedback(
     pool: &Pool,
     sale_id: Uuid,

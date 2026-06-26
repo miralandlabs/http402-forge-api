@@ -612,6 +612,30 @@ pub async fn find_sale_by_payment(
     Ok(row.as_ref().map(map_sale))
 }
 
+pub async fn find_buyer_sale_for_listing(
+    pool: &Pool,
+    listing_id: Uuid,
+    buyer_wallet: &str,
+) -> AppResult<Option<SaleRow>> {
+    let client = pool
+        .get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("postgres conn: {e}")))?;
+    let row = client
+        .query_opt(
+            r#"
+            SELECT * FROM sales
+            WHERE listing_id = $1 AND buyer_wallet = $2
+            ORDER BY settled_at DESC
+            LIMIT 1
+            "#,
+            &[&listing_id, &buyer_wallet],
+        )
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("find buyer sale: {e}")))?;
+    Ok(row.as_ref().map(map_sale))
+}
+
 pub async fn insert_sale_feedback(
     pool: &Pool,
     sale_id: Uuid,

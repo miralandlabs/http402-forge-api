@@ -275,6 +275,21 @@ impl Database {
         }
     }
 
+    pub async fn find_buyer_sale_for_listing(
+        &self,
+        listing_id: uuid::Uuid,
+        buyer_wallet: &str,
+    ) -> AppResult<Option<SaleRow>> {
+        match &self.backend {
+            DbBackend::Postgres(pool) => {
+                postgres::find_buyer_sale_for_listing(pool, listing_id, buyer_wallet).await
+            }
+            DbBackend::Sqlite(pool) => {
+                sqlite::find_buyer_sale_for_listing(pool, listing_id, buyer_wallet).await
+            }
+        }
+    }
+
     pub async fn insert_sale_feedback(
         &self,
         sale_id: uuid::Uuid,

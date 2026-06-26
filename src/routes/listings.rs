@@ -202,30 +202,12 @@ pub async fn download(
         Some(record_sale(&state, &row, &payment).await?)
     };
 
-    let (stream, content_type) = state.storage.stream(&row.asset_key).await?;
-    let body = Body::from_stream(stream.map(|result| result.map_err(axum::Error::new)));
-    let mut response = Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, content_type)
-        .header(
-            header::CONTENT_DISPOSITION,
-            format!("attachment; filename=\"{}\"", sanitize_filename(&row.title)),
-        )
-        .body(body)
-        .map_err(|e| AppError::Internal(e.into()))?;
-
-    if let Some(sale) = sale_row {
-        response.headers_mut().insert(
-            "X-Forge-Sale-Id",
-            header::HeaderValue::from_str(&sale.id.to_string())
-                .map_err(|e| AppError::Internal(e.into()))?,
-        );
-    }
-
-    if !payment.settle_proof.is_null() {
-        response = PaymentGate::attach_payment_response(response, &payment.settle_proof);
-    }
-    Ok(response)
+    let settle = if payment.settle_proof.is_null() {
+        None
+    } else {
+        Some(&payment.settle_proof)
+    };
+    build_asset_download_response(&state, &row, sale_row.as_ref(), settle).await
 }
 
 #[derive(Debug, Deserialize)]
@@ -318,6 +300,38 @@ fn sanitize_filename(title: &str) -> String {
         })
         .take(80)
         .collect()
+}
+
+pub(crate) async fn build_asset_download_response(
+    state: &SharedState,
+    row: &ListingRow,
+    sale: Option<&crate::db::SaleRow>,
+    settle_proof: Option<&serde_json::Value>,
+) -> AppResult<Response> {
+    let (stream, content_type) = state.storage.stream(&row.asset_key).await?;
+    let body = Body::from_stream(stream.map(|result| result.map_err(axum::Error::new)));
+    let mut response = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{}\"", sanitize_filename(&row.title)),
+        )
+        .body(body)
+        .map_err(|e| AppError::Internal(e.into()))?;
+
+    if let Some(sale) = sale {
+        response.headers_mut().insert(
+            "X-Forge-Sale-Id",
+            header::HeaderValue::from_str(&sale.id.to_string())
+                .map_err(|e| AppError::Internal(e.into()))?,
+        );
+    }
+
+    if let Some(settle) = settle_proof {
+        response = PaymentGate::attach_payment_response(response, settle);
+    }
+    Ok(response)
 }
 
 pub async fn create(

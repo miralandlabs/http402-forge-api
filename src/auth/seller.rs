@@ -12,6 +12,7 @@ use crate::error::{AppError, AppResult};
 const CHALLENGE_PREFIX: &str = "http402-forge:create-listing:v1";
 const DELIST_CHALLENGE_PREFIX: &str = "http402-forge:delist-listing:v1";
 const FEEDBACK_CHALLENGE_PREFIX: &str = "http402-forge:sale-feedback:v1";
+const REDOWNLOAD_CHALLENGE_PREFIX: &str = "http402-forge:redownload:v1";
 const CHALLENGE_TTL: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Clone)]
@@ -81,6 +82,30 @@ impl SellerAuth {
         let expires_at = Utc::now() + chrono::Duration::seconds(CHALLENGE_TTL.as_secs() as i64);
         let message = format!(
             "{FEEDBACK_CHALLENGE_PREFIX}\nwallet:{wallet}\nsale:{sale_id}\nchallenge:{id}\nexpires:{}",
+            expires_at.to_rfc3339()
+        );
+        let stored = StoredChallenge {
+            wallet: wallet.to_string(),
+            message: message.clone(),
+            expires_at,
+        };
+        self.pending
+            .lock()
+            .expect("seller auth lock")
+            .insert(id, stored);
+        Ok((message, expires_at))
+    }
+
+    pub fn issue_redownload_challenge(
+        &self,
+        wallet: &str,
+        listing_id: uuid::Uuid,
+    ) -> AppResult<(String, DateTime<Utc>)> {
+        validate_wallet_pubkey(wallet).map_err(|m| AppError::validation("buyer_wallet", m))?;
+        let id = Uuid::new_v4().to_string();
+        let expires_at = Utc::now() + chrono::Duration::seconds(CHALLENGE_TTL.as_secs() as i64);
+        let message = format!(
+            "{REDOWNLOAD_CHALLENGE_PREFIX}\nwallet:{wallet}\nlisting:{listing_id}\nchallenge:{id}\nexpires:{}",
             expires_at.to_rfc3339()
         );
         let stored = StoredChallenge {
@@ -192,6 +217,10 @@ pub fn parse_feedback_sale_id(message: &str) -> Option<uuid::Uuid> {
     })
 }
 
+pub fn parse_redownload_listing_id(message: &str) -> Option<uuid::Uuid> {
+    parse_delist_listing_id(message)
+}
+
 fn validate_wallet_pubkey(wallet: &str) -> Result<(), String> {
     if wallet.len() < 32 || wallet.len() > 44 {
         return Err("invalid seller_wallet".into());
@@ -284,5 +313,20 @@ mod tests {
         let sig_b64 = base64::engine::general_purpose::STANDARD.encode(signature.to_bytes());
         auth.verify_and_consume(&wallet, &message, &sig_b64)
             .expect("verify delist");
+    }
+
+    #[test]
+    fn redownload_challenge_round_trip() {
+        let auth = SellerAuth::default();
+        let seed = [13u8; 32];
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
+        let wallet = bs58::encode(signing_key.verifying_key().to_bytes()).into_string();
+        let listing_id = uuid::Uuid::new_v4();
+        let (message, _expires) = auth.issue_redownload_challenge(&wallet, listing_id).unwrap();
+        assert_eq!(parse_redownload_listing_id(&message), Some(listing_id));
+        let signature = signing_key.sign(message.as_bytes());
+        let sig_b64 = base64::engine::general_purpose::STANDARD.encode(signature.to_bytes());
+        auth.verify_and_consume(&wallet, &message, &sig_b64)
+            .expect("verify redownload");
     }
 }
