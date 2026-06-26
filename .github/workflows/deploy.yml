@@ -63,10 +63,10 @@ jobs:
             sleep 5
           done
           DELIST="${BASE}/api/v1/seller/delist-challenge?seller_wallet=buyA5hR1Z9KtHQRBTmLkjsFfjAabDwdZtrRC6edqxAJ&listing_id=00000000-0000-0000-0000-000000000001"
-          BODY="$(curl -fsS "$DELIST" 2>/dev/null || true)"
+          BODY="$(curl -sS "$DELIST" 2>/dev/null || true)"
           CODE="$(curl -sS -o /dev/null -w '%{http_code}' "$DELIST")"
-          if [ "$CODE" = "404" ] && [ -n "$BODY" ]; then
-            echo "✅ delist-challenge route (404 with JSON body)"
+          if [ "$CODE" = "200" ] || { [ "$CODE" = "404" ] && [ -n "$BODY" ]; }; then
+            echo "✅ delist-challenge route (HTTP ${CODE})"
             exit 0
           fi
           echo "❌ delist-challenge missing or stale binary (HTTP ${CODE}, body len=${#BODY})" >&2
