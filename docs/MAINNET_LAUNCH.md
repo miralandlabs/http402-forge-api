@@ -46,8 +46,7 @@ Use this checklist before pointing production traffic at `https://api.http402.tr
 ## Monitoring
 
 - [ ] Health check: `GET /health` (200, database + storage reachable)
-- [ ] Log shipping (structured JSON via `RUST_LOG`)
-- [ ] Alert on 5xx rate, facilitator timeouts, R2 errors
+- [ ] Log shipping / alerting on 5xx rate, facilitator timeouts, R2 errors (stdout via journald; optional `LOG_FILE_DIR` for host files)
 - [ ] Monitor SSE `/api/v1/events` connectivity if live ticker is used in UI
 
 ## Frontend

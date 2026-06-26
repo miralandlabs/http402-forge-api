@@ -160,6 +160,22 @@ Defaults keep behavior unchanged (`MODERATION_PROVIDER=none`). See [docs/AGENT_A
 
 Migration `004_trust_moderation.sql` adds `sale_feedback`, `blocked_content_hashes`, and listing moderation columns (applied on startup with 001–003).
 
+## Logging
+
+Rust `tracing` writes **compact text** to stdout (→ Docker **journald** via `--log-driver journald`).
+
+On VPS Docker deploys, **file logs are automatic** after the next `forge-deploy.sh`: the systemd unit mounts `/var/log/forge/{cluster}:/app/logs`, deploy creates the host directory, and the API writes daily `forge.log.YYYY-MM-DD` there when that mount exists.
+
+| Where | How to read |
+|-------|-------------|
+| Live (VPS) | `journalctl -t forge-devnet -f` or `journalctl -t forge-mainnet -f` |
+| Last lines | `journalctl -t forge-devnet -n 200 --no-pager` |
+| Host files | `tail -f /var/log/forge/devnet/forge.log.$(date +%F)` (or `.../mainnet/...`) |
+
+Defaults: `RUST_LOG=http402_forge_api=info,tower_http=warn`. File sink uses `trace` for `http402_forge_api` unless `RUST_LOG` is set. Disable files: `LOG_FILE_DIR=` (empty) in `/etc/forge/*.env`.
+
+**Re-run `forge-install.sh`?** Not required if you already ran install once — `forge-deploy.sh` syncs systemd units and creates log dirs. Re-run install only for a fresh host or to refresh env templates (it does not overwrite existing `/etc/forge/*.env`).
+
 ## Rollback
 
 ```bash

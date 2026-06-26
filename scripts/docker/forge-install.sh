@@ -19,6 +19,8 @@ install -d -m 0750 /etc/forge
 install -d -m 0755 /etc/forge/ssl
 install -d -m 0750 /var/lib/forge/devnet/data
 install -d -m 0750 /var/lib/forge/mainnet/data
+install -d -m 0755 /var/log/forge/devnet
+install -d -m 0755 /var/log/forge/mainnet
 
 if [[ ! -f /etc/forge/devnet.env ]]; then
     install -m 0640 "${SCRIPT_DIR}/forge-devnet.env.example" /etc/forge/devnet.env
