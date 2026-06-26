@@ -24,7 +24,7 @@ RUN echo "[build] http402-forge-api release binary" && \
 FROM debian:bookworm-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libssl3 ca-certificates ffmpeg poppler-utils && \
+        libssl3 ca-certificates ffmpeg poppler-utils ghostscript && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

@@ -11,11 +11,12 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::db::normalize_search;
+use crate::db::ListingFilterBinds;
 use crate::db::ListingRow;
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    parse_price_usdc, text_preview_snippet, validate_category, validate_wallet, ListingPublic,
+    parse_price_usdc, parse_tags_field, tags_to_json, text_preview_snippet, validate_category,
+    validate_license, validate_wallet, ListingPublic,
 };
 use crate::preview::{
     self, generate_media_clip, generate_pdf_first_page_jpeg, is_pdf_content_type,
@@ -29,6 +30,7 @@ pub struct ListQuery {
     pub category: Option<String>,
     pub agent_friendly: Option<String>,
     pub q: Option<String>,
+    pub seller_wallet: Option<String>,
     #[serde(default = "default_sort")]
     pub sort: String,
     #[serde(default = "default_limit")]
@@ -38,7 +40,7 @@ pub struct ListQuery {
 }
 
 fn default_sort() -> String {
-    "newest".into()
+    "trending".into()
 }
 
 fn default_limit() -> i64 {
@@ -71,15 +73,23 @@ pub async fn list(
         validate_category(c).map_err(AppError::BadRequest)?;
     }
     let agent_friendly = parse_optional_bool(q.agent_friendly.as_deref());
-    let search = normalize_search(q.q);
-    let search_ref = search.as_deref();
-    let total = state
-        .db
-        .count_listings(cat, agent_friendly, search_ref)
-        .await?;
+    let seller_wallet_param = q
+        .seller_wallet
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(w) = seller_wallet_param {
+        validate_wallet(w).map_err(|m| AppError::validation("seller_wallet", m))?;
+    }
+    let filters =
+        ListingFilterBinds::from_query(cat, agent_friendly, q.q.clone(), seller_wallet_param);
+    if let Some(ref w) = filters.seller_wallet {
+        validate_wallet(w).map_err(|m| AppError::validation("seller_wallet", m))?;
+    }
+    let total = state.db.count_listings(&filters).await?;
     let rows = state
         .db
-        .list_listings(cat, agent_friendly, search_ref, &q.sort, q.limit, q.offset)
+        .list_listings(&filters, &q.sort, q.limit, q.offset)
         .await?;
     let base = state.config.seller_public_base_url.clone();
     let items = rows
@@ -105,9 +115,10 @@ pub async fn preview(
     Path(id): Path<Uuid>,
 ) -> AppResult<Response> {
     let row = state.db.get_listing(id).await?;
-    let (bytes, content_type) = load_preview_content(&state, &row).await?;
+    let (stream_key, content_type) = resolve_preview_key_and_type(&state, &row).await?;
 
     if content_type.starts_with("text/") || content_type == "application/json" {
+        let (bytes, _) = state.storage.get(&stream_key).await?;
         let text = String::from_utf8_lossy(&bytes);
         let snippet = text_preview_snippet(&text, 500);
         return Ok((
@@ -118,34 +129,43 @@ pub async fn preview(
             .into_response());
     }
 
-    Ok((
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, content_type.as_str())],
-        Body::from(bytes),
-    )
-        .into_response())
+    let (stream, content_type) = state.storage.stream(&stream_key).await?;
+    let body = Body::from_stream(stream.map(|result| result.map_err(axum::Error::new)));
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::ACCEPT_RANGES, "bytes")
+        .body(body)
+        .map_err(|e| AppError::Internal(e.into()))?;
+    Ok(response)
 }
 
-async fn load_preview_content(
+async fn resolve_preview_key_and_type(
     state: &SharedState,
     row: &ListingRow,
-) -> AppResult<(Bytes, String)> {
-    let (mut bytes, mut content_type) = state.storage.get(&row.preview_key).await?;
-    let is_legacy_placeholder = content_type.starts_with("text/")
-        && bytes.starts_with(b"Preview unavailable for")
-        && (row.content_type.starts_with("video/") || row.content_type.starts_with("audio/"));
-    if is_legacy_placeholder {
-        (bytes, content_type) = state.storage.get(&row.asset_key).await?;
+) -> AppResult<(String, String)> {
+    let content_type = state.storage.head(&row.preview_key).await?;
+    if content_type.starts_with("text/") || content_type == "application/json" {
+        let (bytes, ct) = state.storage.get(&row.preview_key).await?;
+        let is_legacy_placeholder = ct.starts_with("text/")
+            && bytes.starts_with(b"Preview unavailable for")
+            && (row.content_type.starts_with("video/") || row.content_type.starts_with("audio/"));
+        if is_legacy_placeholder {
+            let asset_ct = state.storage.head(&row.asset_key).await?;
+            return Ok((row.asset_key.clone(), asset_ct));
+        }
+        return Ok((row.preview_key.clone(), ct));
     }
-    let is_legacy_media_asset = row.preview_key == row.asset_key
-        && preview::is_media_content_type(&row.content_type);
+
+    let is_legacy_media_asset =
+        row.preview_key == row.asset_key && preview::is_media_content_type(&row.content_type);
     if is_legacy_media_asset {
         tracing::warn!(
             listing_id = %row.id,
             "listing uses full asset as preview; re-upload to generate a clipped preview"
         );
     }
-    Ok((bytes, content_type))
+    Ok((row.preview_key.clone(), content_type))
 }
 
 pub async fn download(
@@ -153,9 +173,9 @@ pub async fn download(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> AppResult<Response> {
-    let row = state.db.get_listing(id).await?;
+    let row = state.db.get_listing_any(id).await?;
     let path = format!("/api/v1/listings/{id}/download");
-    let payment = PaymentGate::check_download(&state, &headers, &row, &path).await?;
+    let payment = PaymentGate::check_download_active_or_paid(&state, &headers, &row, &path).await?;
 
     if !payment.already_paid {
         record_sale(&state, &row, &payment).await?;
@@ -177,6 +197,45 @@ pub async fn download(
         response = PaymentGate::attach_payment_response(response, &payment.settle_proof);
     }
     Ok(response)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DelistRequest {
+    pub seller_wallet: String,
+    pub seller_challenge: String,
+    pub seller_signature: String,
+}
+
+pub async fn delist(
+    State(state): State<SharedState>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<DelistRequest>,
+) -> AppResult<StatusCode> {
+    validate_wallet(&body.seller_wallet).map_err(|m| AppError::validation("seller_wallet", m))?;
+
+    if !state.config.skip_seller_auth {
+        state.seller_auth.verify_and_consume(
+            &body.seller_wallet,
+            &body.seller_challenge,
+            &body.seller_signature,
+        )?;
+        let challenge_listing = crate::auth::parse_delist_listing_id(&body.seller_challenge)
+            .ok_or_else(|| AppError::Forbidden("invalid delist challenge".into()))?;
+        if challenge_listing != id {
+            return Err(AppError::Forbidden(
+                "delist challenge listing mismatch".into(),
+            ));
+        }
+    }
+
+    let removed = state
+        .db
+        .soft_delist_listing(id, &body.seller_wallet)
+        .await?;
+    if !removed {
+        return Err(AppError::NotFound);
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn record_sale(
@@ -245,25 +304,24 @@ pub async fn create(
     let mut agent_friendly = false;
     let mut seller_challenge = String::new();
     let mut seller_signature = String::new();
+    let mut tags_raw = String::new();
+    let mut license: Option<String> = None;
+    let mut content_hash: Option<String> = None;
     let mut asset_bytes: Option<(String, Bytes)> = None;
     let mut preview_bytes: Option<(String, Bytes)> = None;
     let mut vault_checked = state.config.skip_seller_vault_check;
 
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|e| {
-            let msg = e.to_string();
-            if msg.contains("multipart") || msg.contains("limit") {
-                AppError::BadRequest(format!(
-                    "upload too large or invalid multipart (max asset {} bytes, preview {} bytes)",
-                    state.config.max_asset_bytes, state.config.max_preview_bytes
-                ))
-            } else {
-                AppError::BadRequest(msg)
-            }
-        })?
-    {
+    while let Some(field) = multipart.next_field().await.map_err(|e| {
+        let msg = e.to_string();
+        if msg.contains("multipart") || msg.contains("limit") {
+            AppError::BadRequest(format!(
+                "upload too large or invalid multipart (max asset {} bytes, preview {} bytes)",
+                state.config.max_asset_bytes, state.config.max_preview_bytes
+            ))
+        } else {
+            AppError::BadRequest(msg)
+        }
+    })? {
         let name = field.name().unwrap_or("").to_string();
         if (name == "asset" || name == "preview")
             && !vault_checked
@@ -275,7 +333,8 @@ pub async fn create(
             ));
         }
         if (name == "asset" || name == "preview") && !vault_checked {
-            validate_wallet(&seller_wallet).map_err(|m| AppError::validation("seller_wallet", m))?;
+            validate_wallet(&seller_wallet)
+                .map_err(|m| AppError::validation("seller_wallet", m))?;
             require_seller_vault(&state, &seller_wallet).await?;
             vault_checked = true;
         }
@@ -292,6 +351,19 @@ pub async fn create(
             }
             "seller_challenge" => seller_challenge = field.text().await.unwrap_or_default(),
             "seller_signature" => seller_signature = field.text().await.unwrap_or_default(),
+            "tags" => tags_raw = field.text().await.unwrap_or_default(),
+            "license" => {
+                let v = field.text().await.unwrap_or_default();
+                if !v.trim().is_empty() {
+                    license = Some(v.trim().to_string());
+                }
+            }
+            "content_hash" => {
+                let v = field.text().await.unwrap_or_default();
+                if !v.trim().is_empty() {
+                    content_hash = Some(v.trim().to_string());
+                }
+            }
             "asset" => {
                 let filename = field.file_name().unwrap_or("asset.bin").to_string();
                 let ct = field.content_type().map(str::to_string).unwrap_or_else(|| {
@@ -333,7 +405,8 @@ pub async fn create(
             _ => {}
         }
         if name == "seller_wallet" && !seller_wallet.trim().is_empty() && !vault_checked {
-            validate_wallet(&seller_wallet).map_err(|m| AppError::validation("seller_wallet", m))?;
+            validate_wallet(&seller_wallet)
+                .map_err(|m| AppError::validation("seller_wallet", m))?;
             require_seller_vault(&state, &seller_wallet).await?;
             vault_checked = true;
         }
@@ -349,8 +422,12 @@ pub async fn create(
     }
     let price_micro =
         parse_price_usdc(&price_usdc).map_err(|m| AppError::validation("price_usdc", m))?;
+    validate_license(license.as_deref()).map_err(|m| AppError::validation("license", m))?;
+    let tags = parse_tags_field(&tags_raw).map_err(|m| AppError::validation("tags", m))?;
     let (asset_ct, asset_data) =
         asset_bytes.ok_or_else(|| AppError::validation("asset", "file required"))?;
+
+    let content_hash = content_hash.or_else(|| Some(sha256_hex(&asset_data)));
 
     if !state.config.skip_seller_auth {
         state.seller_auth.verify_and_consume(
@@ -371,48 +448,8 @@ pub async fn create(
         .put(&asset_key, &asset_ct, asset_data.clone())
         .await?;
 
-    let (preview_key, _preview_ct) = if let Some((pct, pdata)) = preview_bytes {
-        let key = object_key("previews", id, "preview");
-        state.storage.put(&key, &pct, pdata).await?;
-        (key, pct)
-    } else if asset_ct.starts_with("image/") {
-        let key = object_key("previews", id, "preview.jpg");
-        let preview = generate_image_preview(&asset_data, &asset_ct)?;
-        state
-            .storage
-            .put(&key, "image/jpeg", preview.clone())
-            .await?;
-        (key, "image/jpeg".to_string())
-    } else if asset_ct.starts_with("text/") || asset_ct == "application/json" {
-        let snippet = text_preview_snippet(&String::from_utf8_lossy(&asset_data), 500);
-        let key = object_key("previews", id, "preview.txt");
-        let bytes = Bytes::from(snippet);
-        state
-            .storage
-            .put(&key, "text/plain; charset=utf-8", bytes)
-            .await?;
-        (key, "text/plain; charset=utf-8".to_string())
-    } else if is_pdf_content_type(&asset_ct) {
-        let key = object_key("previews", id, "preview.jpg");
-        let preview = generate_pdf_first_page_jpeg(&asset_data, &state.config).await?;
-        state
-            .storage
-            .put(&key, "image/jpeg", preview.clone())
-            .await?;
-        (key, "image/jpeg".to_string())
-    } else if asset_ct.starts_with("video/") || asset_ct.starts_with("audio/") {
-        let (clip, clip_ct) =
-            generate_media_clip(&asset_data, &asset_ct, &state.config).await?;
-        let ext = clip_extension(&clip_ct);
-        let key = object_key("previews", id, &format!("preview.{ext}"));
-        state.storage.put(&key, &clip_ct, clip).await?;
-        (key, clip_ct)
-    } else {
-        let key = object_key("previews", id, "placeholder.txt");
-        let bytes = Bytes::from(format!("Preview unavailable for {asset_ct}"));
-        state.storage.put(&key, "text/plain", bytes).await?;
-        (key, "text/plain".to_string())
-    };
+    let (preview_key, preview_content_type) =
+        store_listing_preview(&state, id, &asset_ct, &asset_data, preview_bytes).await?;
 
     let delivery_scheme = if asset_data.len() as u64 >= state.config.escrow_size_threshold {
         "escrow"
@@ -429,12 +466,16 @@ pub async fn create(
         category,
         price_micro_usdc: price_micro,
         preview_key,
+        preview_content_type,
         asset_key,
         content_type: asset_ct,
         byte_size: asset_data.len() as i64,
         agent_friendly,
         delivery_scheme: delivery_scheme.into(),
         status: "active".into(),
+        tags: tags_to_json(&tags),
+        license,
+        content_hash,
         created_at: Utc::now(),
     };
 
@@ -475,4 +516,106 @@ fn clip_extension(content_type: &str) -> &'static str {
     } else {
         "mp4"
     }
+}
+
+async fn store_listing_preview(
+    state: &SharedState,
+    id: Uuid,
+    asset_ct: &str,
+    asset_data: &Bytes,
+    preview_bytes: Option<(String, Bytes)>,
+) -> AppResult<(String, String)> {
+    if let Some((pct, pdata)) = preview_bytes {
+        return store_uploaded_preview(state, id, &pct, &pdata).await;
+    }
+    if asset_ct.starts_with("image/") {
+        let key = object_key("previews", id, "preview.jpg");
+        let preview = generate_image_preview(asset_data, asset_ct)?;
+        state
+            .storage
+            .put(&key, "image/jpeg", preview.clone())
+            .await?;
+        return Ok((key, "image/jpeg".to_string()));
+    }
+    if asset_ct.starts_with("text/") || asset_ct == "application/json" {
+        let snippet = text_preview_snippet(&String::from_utf8_lossy(asset_data), 500);
+        let key = object_key("previews", id, "preview.txt");
+        let bytes = Bytes::from(snippet);
+        state
+            .storage
+            .put(&key, "text/plain; charset=utf-8", bytes)
+            .await?;
+        return Ok((key, "text/plain; charset=utf-8".to_string()));
+    }
+    if is_pdf_content_type(asset_ct) {
+        let key = object_key("previews", id, "preview.jpg");
+        match generate_pdf_first_page_jpeg(asset_data, &state.config).await {
+            Ok(preview) => {
+                state
+                    .storage
+                    .put(&key, "image/jpeg", preview.clone())
+                    .await?;
+                Ok((key, "image/jpeg".to_string()))
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "PDF auto-preview failed; listing will use text placeholder");
+                let placeholder_key = object_key("previews", id, "placeholder.txt");
+                let bytes = Bytes::from(format!("Preview unavailable for {asset_ct}"));
+                state
+                    .storage
+                    .put(&placeholder_key, "text/plain", bytes)
+                    .await?;
+                Ok((placeholder_key, "text/plain".to_string()))
+            }
+        }
+    } else if asset_ct.starts_with("video/") || asset_ct.starts_with("audio/") {
+        let (clip, clip_ct) = generate_media_clip(asset_data, asset_ct, &state.config).await?;
+        let ext = clip_extension(&clip_ct);
+        let key = object_key("previews", id, &format!("preview.{ext}"));
+        state.storage.put(&key, &clip_ct, clip).await?;
+        Ok((key, clip_ct))
+    } else {
+        let key = object_key("previews", id, "placeholder.txt");
+        let bytes = Bytes::from(format!("Preview unavailable for {asset_ct}"));
+        state.storage.put(&key, "text/plain", bytes).await?;
+        Ok((key, "text/plain".to_string()))
+    }
+}
+
+async fn store_uploaded_preview(
+    state: &SharedState,
+    id: Uuid,
+    preview_ct: &str,
+    preview_data: &Bytes,
+) -> AppResult<(String, String)> {
+    if is_pdf_content_type(preview_ct) {
+        let key = object_key("previews", id, "preview.jpg");
+        match generate_pdf_first_page_jpeg(preview_data, &state.config).await {
+            Ok(jpeg) => {
+                state.storage.put(&key, "image/jpeg", jpeg).await?;
+                return Ok((key, "image/jpeg".to_string()));
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Uploaded PDF preview could not be rasterized; storing PDF for inline embed"
+                );
+                let key = object_key("previews", id, "preview.pdf");
+                state.storage.put(&key, preview_ct, preview_data.clone()).await?;
+                return Ok((key, preview_ct.to_string()));
+            }
+        }
+    }
+
+    let key = object_key("previews", id, "preview");
+    state
+        .storage
+        .put(&key, preview_ct, preview_data.clone())
+        .await?;
+    Ok((key, preview_ct.to_string()))
+}
+
+fn sha256_hex(data: &Bytes) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(data))
 }

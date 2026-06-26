@@ -6,10 +6,16 @@ use rusqlite::{params, Row};
 use uuid::Uuid;
 
 use super::{LeaderboardListingRow, LeaderboardWalletRow, ListingRow, PaymentRow, SaleRow};
-use crate::db::listing_filters::search_like_pattern;
+use crate::db::listing_filters::{listing_filter_suffix, ListingFilterBinds};
 use crate::error::{AppError, AppResult};
 
 const SCHEMA: &str = include_str!("../../migrations/sqlite/001_init.sql");
+const SCHEMA_002: &str = include_str!("../../migrations/sqlite/002_agent_metadata.sql");
+const SCHEMA_003: &str = include_str!("../../migrations/sqlite/003_preview_content_type.sql");
+
+const LISTING_COLUMNS: &str = "id, seller_wallet, display_name, title, description, category,
+                        price_micro_usdc, preview_key, preview_content_type, asset_key, content_type, byte_size,
+                        agent_friendly, delivery_scheme, status, tags, license, content_hash, created_at";
 
 fn configure_sqlite_connection(conn: &mut rusqlite::Connection) -> rusqlite::Result<()> {
     conn.busy_timeout(Duration::from_millis(10_000))?;
@@ -72,6 +78,44 @@ pub async fn migrate(pool: &Pool) -> AppResult<()> {
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite interact: {e}")))?
         .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite migrate: {e}")))?;
+
+    let sql2 = SCHEMA_002.to_string();
+    pool.get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite conn: {e}")))?
+        .interact(move |conn| {
+            for stmt in sql2.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+                if let Err(e) = conn.execute(stmt, []) {
+                    let msg = e.to_string();
+                    if !msg.contains("duplicate column") {
+                        return Err(e);
+                    }
+                }
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite interact: {e}")))?
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite migrate 002: {e}")))?;
+
+    let sql3 = SCHEMA_003.to_string();
+    pool.get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite conn: {e}")))?
+        .interact(move |conn| {
+            for stmt in sql3.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+                if let Err(e) = conn.execute(stmt, []) {
+                    let msg = e.to_string();
+                    if !msg.contains("duplicate column") {
+                        return Err(e);
+                    }
+                }
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite interact: {e}")))?
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite migrate 003: {e}")))?;
     Ok(())
 }
 
@@ -102,9 +146,9 @@ pub async fn insert_listing(pool: &Pool, row: &ListingRow) -> AppResult<()> {
                 r#"
                 INSERT INTO listings (
                     id, seller_wallet, display_name, title, description, category,
-                    price_micro_usdc, preview_key, asset_key, content_type, byte_size,
-                    agent_friendly, delivery_scheme, status, created_at
-                ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
+                    price_micro_usdc, preview_key, preview_content_type, asset_key, content_type, byte_size,
+                    agent_friendly, delivery_scheme, status, tags, license, content_hash, created_at
+                ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)
                 "#,
                 params![
                     row.id.to_string(),
@@ -115,12 +159,16 @@ pub async fn insert_listing(pool: &Pool, row: &ListingRow) -> AppResult<()> {
                     row.category,
                     row.price_micro_usdc,
                     row.preview_key,
+                    row.preview_content_type,
                     row.asset_key,
                     row.content_type,
                     row.byte_size,
                     i32::from(row.agent_friendly),
                     row.delivery_scheme,
                     row.status,
+                    row.tags,
+                    row.license,
+                    row.content_hash,
                     row.created_at.to_rfc3339(),
                 ],
             )
@@ -137,12 +185,9 @@ pub async fn get_listing(pool: &Pool, id: Uuid) -> AppResult<ListingRow> {
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite conn: {e}")))?
         .interact(move |conn| -> rusqlite::Result<Option<ListingRow>> {
-            let mut stmt = conn.prepare(
-                "SELECT id, seller_wallet, display_name, title, description, category,
-                        price_micro_usdc, preview_key, asset_key, content_type, byte_size,
-                        agent_friendly, delivery_scheme, status, created_at
-                 FROM listings WHERE id = ?1 AND status = 'active'",
-            )?;
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {LISTING_COLUMNS} FROM listings WHERE id = ?1 AND status = 'active'",
+            ))?;
             let mut rows = stmt.query(params![id])?;
             if let Some(row) = rows.next()? {
                 return Ok(Some(map_listing(row)?));
@@ -155,64 +200,82 @@ pub async fn get_listing(pool: &Pool, id: Uuid) -> AppResult<ListingRow> {
         .ok_or(AppError::NotFound)
 }
 
-pub async fn count_listings(
-    pool: &Pool,
-    category: Option<&str>,
-    agent_friendly: Option<bool>,
-    search: Option<&str>,
-) -> AppResult<i64> {
-    let category = category.map(str::to_string);
-    let search_pat = search.map(search_like_pattern);
+pub async fn get_listing_any(pool: &Pool, id: Uuid) -> AppResult<ListingRow> {
+    let id = id.to_string();
+    pool.get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite conn: {e}")))?
+        .interact(move |conn| -> rusqlite::Result<Option<ListingRow>> {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {LISTING_COLUMNS} FROM listings WHERE id = ?1",
+            ))?;
+            let mut rows = stmt.query(params![id])?;
+            if let Some(row) = rows.next()? {
+                return Ok(Some(map_listing(row)?));
+            }
+            Ok(None)
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite interact: {e}")))?
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("get listing: {e}")))?
+        .ok_or(AppError::NotFound)
+}
+
+pub async fn soft_delist_listing(pool: &Pool, id: Uuid, seller_wallet: &str) -> AppResult<bool> {
+    let id = id.to_string();
+    let seller_wallet = seller_wallet.to_string();
+    let n = pool
+        .get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite conn: {e}")))?
+        .interact(move |conn| {
+            conn.execute(
+                "UPDATE listings SET status = 'removed' WHERE id = ?1 AND seller_wallet = ?2 AND status = 'active'",
+                params![id, seller_wallet],
+            )
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite interact: {e}")))?
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("soft delist: {e}")))?;
+    Ok(n > 0)
+}
+
+fn listing_filter_values(
+    binds: &ListingFilterBinds,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> Vec<rusqlite::types::Value> {
+    let mut values = Vec::new();
+    if let Some(ref c) = binds.category {
+        values.push(c.clone().into());
+    }
+    if let Some(af) = binds.agent_friendly {
+        values.push(i32::from(af).into());
+    }
+    if let Some(ref w) = binds.seller_wallet {
+        values.push(w.clone().into());
+    }
+    if let Some(ref p) = binds.search_pattern {
+        values.push(p.clone().into());
+    }
+    if let Some(l) = limit {
+        values.push(l.into());
+    }
+    if let Some(o) = offset {
+        values.push(o.into());
+    }
+    values
+}
+
+pub async fn count_listings(pool: &Pool, binds: &ListingFilterBinds) -> AppResult<i64> {
+    let (suffix, _) = listing_filter_suffix(binds, 1, true);
+    let sql = format!("SELECT COUNT(*) FROM listings WHERE status = 'active'{suffix}");
+    let values = listing_filter_values(binds, None, None);
     pool.get()
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite conn: {e}")))?
         .interact(move |conn| -> rusqlite::Result<i64> {
-            match (
-                category.as_deref(),
-                agent_friendly,
-                search_pat.as_deref(),
-            ) {
-                (Some(cat), Some(af), Some(pat)) => conn.query_row(
-                    "SELECT COUNT(*) FROM listings WHERE status = 'active' AND category = ?1 AND agent_friendly = ?2 AND (title LIKE ?3 ESCAPE '\\' OR description LIKE ?3 ESCAPE '\\')",
-                    params![cat, i32::from(af), pat],
-                    |row| row.get(0),
-                ),
-                (Some(cat), Some(af), None) => conn.query_row(
-                    "SELECT COUNT(*) FROM listings WHERE status = 'active' AND category = ?1 AND agent_friendly = ?2",
-                    params![cat, i32::from(af)],
-                    |row| row.get(0),
-                ),
-                (Some(cat), None, Some(pat)) => conn.query_row(
-                    "SELECT COUNT(*) FROM listings WHERE status = 'active' AND category = ?1 AND (title LIKE ?2 ESCAPE '\\' OR description LIKE ?2 ESCAPE '\\')",
-                    params![cat, pat],
-                    |row| row.get(0),
-                ),
-                (Some(cat), None, None) => conn.query_row(
-                    "SELECT COUNT(*) FROM listings WHERE status = 'active' AND category = ?1",
-                    params![cat],
-                    |row| row.get(0),
-                ),
-                (None, Some(af), Some(pat)) => conn.query_row(
-                    "SELECT COUNT(*) FROM listings WHERE status = 'active' AND agent_friendly = ?1 AND (title LIKE ?2 ESCAPE '\\' OR description LIKE ?2 ESCAPE '\\')",
-                    params![i32::from(af), pat],
-                    |row| row.get(0),
-                ),
-                (None, Some(af), None) => conn.query_row(
-                    "SELECT COUNT(*) FROM listings WHERE status = 'active' AND agent_friendly = ?1",
-                    params![i32::from(af)],
-                    |row| row.get(0),
-                ),
-                (None, None, Some(pat)) => conn.query_row(
-                    "SELECT COUNT(*) FROM listings WHERE status = 'active' AND (title LIKE ?1 ESCAPE '\\' OR description LIKE ?1 ESCAPE '\\')",
-                    params![pat],
-                    |row| row.get(0),
-                ),
-                (None, None, None) => conn.query_row(
-                    "SELECT COUNT(*) FROM listings WHERE status = 'active'",
-                    [],
-                    |row| row.get(0),
-                ),
-            }
+            conn.query_row(&sql, rusqlite::params_from_iter(values), |row| row.get(0))
         })
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite interact: {e}")))?
@@ -221,113 +284,32 @@ pub async fn count_listings(
 
 pub async fn list_listings(
     pool: &Pool,
-    category: Option<&str>,
-    agent_friendly: Option<bool>,
-    search: Option<&str>,
+    binds: &ListingFilterBinds,
     sort: &str,
     limit: i64,
     offset: i64,
 ) -> AppResult<Vec<ListingRow>> {
-    let category = category.map(str::to_string);
-    let search_pat = search.map(search_like_pattern);
     let sort = sort.to_string();
+    let (suffix, next_idx) = listing_filter_suffix(binds, 1, true);
+    let order = match sort.as_str() {
+        "price_asc" => "price_micro_usdc ASC, created_at DESC",
+        "price_desc" => "price_micro_usdc DESC, created_at DESC",
+        "newest" => "created_at DESC",
+        "trending" => "(SELECT COUNT(*) FROM sales s WHERE s.listing_id = listings.id AND s.settled_at >= datetime('now', '-24 hours')) DESC, created_at DESC",
+        _ => "(SELECT COUNT(*) FROM sales s WHERE s.listing_id = listings.id AND s.settled_at >= datetime('now', '-24 hours')) DESC, created_at DESC",
+    };
+    let sql = format!(
+        "SELECT {LISTING_COLUMNS} FROM listings WHERE status = 'active'{suffix} ORDER BY {order} LIMIT ?{next_idx} OFFSET ?{}",
+        next_idx + 1
+    );
+    let values = listing_filter_values(binds, Some(limit), Some(offset));
     pool.get()
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite conn: {e}")))?
         .interact(move |conn| -> rusqlite::Result<Vec<ListingRow>> {
-            let order = match sort.as_str() {
-                "price_asc" => "price_micro_usdc ASC, created_at DESC",
-                "price_desc" => "price_micro_usdc DESC, created_at DESC",
-                _ => "created_at DESC",
-            };
-            let select = "SELECT id, seller_wallet, display_name, title, description, category,
-                            price_micro_usdc, preview_key, asset_key, content_type, byte_size,
-                            agent_friendly, delivery_scheme, status, created_at
-                     FROM listings";
-            match (
-                category.as_deref(),
-                agent_friendly,
-                search_pat.as_deref(),
-            ) {
-                (Some(cat), Some(af), Some(pat)) => {
-                    let sql = format!(
-                        "{select} WHERE status = 'active' AND category = ?1 AND agent_friendly = ?2 \
-                         AND (title LIKE ?3 ESCAPE '\\' OR description LIKE ?3 ESCAPE '\\') \
-                         ORDER BY {order} LIMIT ?4 OFFSET ?5"
-                    );
-                    let mut stmt = conn.prepare(&sql)?;
-                    let rows = stmt.query_map(
-                        params![cat, i32::from(af), pat, limit, offset],
-                        map_listing,
-                    )?;
-                    rows.collect()
-                }
-                (Some(cat), Some(af), None) => {
-                    let sql = format!(
-                        "{select} WHERE status = 'active' AND category = ?1 AND agent_friendly = ?2
-                         ORDER BY {order} LIMIT ?3 OFFSET ?4"
-                    );
-                    let mut stmt = conn.prepare(&sql)?;
-                    let rows = stmt.query_map(params![cat, i32::from(af), limit, offset], map_listing)?;
-                    rows.collect()
-                }
-                (Some(cat), None, Some(pat)) => {
-                    let sql = format!(
-                        "{select} WHERE status = 'active' AND category = ?1 \
-                         AND (title LIKE ?2 ESCAPE '\\' OR description LIKE ?2 ESCAPE '\\') \
-                         ORDER BY {order} LIMIT ?3 OFFSET ?4"
-                    );
-                    let mut stmt = conn.prepare(&sql)?;
-                    let rows = stmt.query_map(params![cat, pat, limit, offset], map_listing)?;
-                    rows.collect()
-                }
-                (Some(cat), None, None) => {
-                    let sql = format!(
-                        "{select} WHERE status = 'active' AND category = ?1
-                         ORDER BY {order} LIMIT ?2 OFFSET ?3"
-                    );
-                    let mut stmt = conn.prepare(&sql)?;
-                    let rows = stmt.query_map(params![cat, limit, offset], map_listing)?;
-                    rows.collect()
-                }
-                (None, Some(af), Some(pat)) => {
-                    let sql = format!(
-                        "{select} WHERE status = 'active' AND agent_friendly = ?1 \
-                         AND (title LIKE ?2 ESCAPE '\\' OR description LIKE ?2 ESCAPE '\\') \
-                         ORDER BY {order} LIMIT ?3 OFFSET ?4"
-                    );
-                    let mut stmt = conn.prepare(&sql)?;
-                    let rows = stmt.query_map(params![i32::from(af), pat, limit, offset], map_listing)?;
-                    rows.collect()
-                }
-                (None, Some(af), None) => {
-                    let sql = format!(
-                        "{select} WHERE status = 'active' AND agent_friendly = ?1
-                         ORDER BY {order} LIMIT ?2 OFFSET ?3"
-                    );
-                    let mut stmt = conn.prepare(&sql)?;
-                    let rows = stmt.query_map(params![i32::from(af), limit, offset], map_listing)?;
-                    rows.collect()
-                }
-                (None, None, Some(pat)) => {
-                    let sql = format!(
-                        "{select} WHERE status = 'active' \
-                         AND (title LIKE ?1 ESCAPE '\\' OR description LIKE ?1 ESCAPE '\\') \
-                         ORDER BY {order} LIMIT ?2 OFFSET ?3"
-                    );
-                    let mut stmt = conn.prepare(&sql)?;
-                    let rows = stmt.query_map(params![pat, limit, offset], map_listing)?;
-                    rows.collect()
-                }
-                (None, None, None) => {
-                    let sql = format!(
-                        "{select} WHERE status = 'active' ORDER BY {order} LIMIT ?1 OFFSET ?2"
-                    );
-                    let mut stmt = conn.prepare(&sql)?;
-                    let rows = stmt.query_map(params![limit, offset], map_listing)?;
-                    rows.collect()
-                }
-            }
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(values), map_listing)?;
+            rows.collect()
         })
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite interact: {e}")))?
@@ -499,13 +481,17 @@ fn map_listing(row: &Row<'_>) -> rusqlite::Result<ListingRow> {
         category: row.get(5)?,
         price_micro_usdc: row.get(6)?,
         preview_key: row.get(7)?,
-        asset_key: row.get(8)?,
-        content_type: row.get(9)?,
-        byte_size: row.get(10)?,
-        agent_friendly: row.get::<_, i32>(11)? != 0,
-        delivery_scheme: row.get(12)?,
-        status: row.get(13)?,
-        created_at: parse_datetime(row.get::<_, String>(14)?)?,
+        preview_content_type: row.get(8)?,
+        asset_key: row.get(9)?,
+        content_type: row.get(10)?,
+        byte_size: row.get(11)?,
+        agent_friendly: row.get::<_, i32>(12)? != 0,
+        delivery_scheme: row.get(13)?,
+        status: row.get(14)?,
+        tags: row.get(15)?,
+        license: row.get(16)?,
+        content_hash: row.get(17)?,
+        created_at: parse_datetime(row.get::<_, String>(18)?)?,
     })
 }
 
@@ -540,4 +526,48 @@ fn parse_datetime(raw: String) -> rusqlite::Result<DateTime<Utc>> {
                 .map(|ndt| ndt.and_utc())
         })
         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+}
+
+pub async fn listings_missing_preview_content_type(
+    pool: &Pool,
+) -> AppResult<Vec<(Uuid, String)>> {
+    let sql = "SELECT id, preview_key FROM listings WHERE preview_content_type = ''".to_string();
+    pool.get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite conn: {e}")))?
+        .interact(move |conn| -> rusqlite::Result<Vec<(Uuid, String)>> {
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    parse_uuid(row.get::<_, String>(0)?)?,
+                    row.get::<_, String>(1)?,
+                ))
+            })?;
+            rows.collect()
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite interact: {e}")))?
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("list preview content types: {e}")))
+}
+
+pub async fn set_preview_content_type(
+    pool: &Pool,
+    id: Uuid,
+    preview_content_type: &str,
+) -> AppResult<()> {
+    let id = id.to_string();
+    let preview_content_type = preview_content_type.to_string();
+    pool.get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite conn: {e}")))?
+        .interact(move |conn| {
+            conn.execute(
+                "UPDATE listings SET preview_content_type = ?2 WHERE id = ?1",
+                params![id, preview_content_type],
+            )
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite interact: {e}")))?
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("set preview content type: {e}")))?;
+    Ok(())
 }

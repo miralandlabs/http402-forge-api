@@ -56,3 +56,9 @@ Listings with `delivery_scheme = escrow` and `byte_size > ESCROW_SIZE_THRESHOLD`
 ## Migrations
 
 SQL files in `migrations/postgres/` and `migrations/sqlite/` run automatically on startup (backend chosen from `DATABASE_URL` prefix).
+
+**Convention (same as pr402 / solrisk):**
+
+- `001_init.sql` — **full** schema for fresh installs.
+- `002_*.sql`, … — **delta** migrations for databases created before that change.
+- When you add columns or indexes, update `001_init.sql` **and** add (or extend) a numbered delta file so both paths stay correct.

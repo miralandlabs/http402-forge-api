@@ -10,6 +10,7 @@ use uuid::Uuid;
 use crate::error::{AppError, AppResult};
 
 const CHALLENGE_PREFIX: &str = "http402-forge:create-listing:v1";
+const DELIST_CHALLENGE_PREFIX: &str = "http402-forge:delist-listing:v1";
 const CHALLENGE_TTL: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Clone)]
@@ -31,6 +32,30 @@ impl SellerAuth {
         let expires_at = Utc::now() + chrono::Duration::seconds(CHALLENGE_TTL.as_secs() as i64);
         let message = format!(
             "{CHALLENGE_PREFIX}\nwallet:{wallet}\nchallenge:{id}\nexpires:{}",
+            expires_at.to_rfc3339()
+        );
+        let stored = StoredChallenge {
+            wallet: wallet.to_string(),
+            message: message.clone(),
+            expires_at,
+        };
+        self.pending
+            .lock()
+            .expect("seller auth lock")
+            .insert(id, stored);
+        Ok((message, expires_at))
+    }
+
+    pub fn issue_delist_challenge(
+        &self,
+        wallet: &str,
+        listing_id: uuid::Uuid,
+    ) -> AppResult<(String, DateTime<Utc>)> {
+        validate_wallet_pubkey(wallet).map_err(|m| AppError::validation("seller_wallet", m))?;
+        let id = Uuid::new_v4().to_string();
+        let expires_at = Utc::now() + chrono::Duration::seconds(CHALLENGE_TTL.as_secs() as i64);
+        let message = format!(
+            "{DELIST_CHALLENGE_PREFIX}\nwallet:{wallet}\nlisting:{listing_id}\nchallenge:{id}\nexpires:{}",
             expires_at.to_rfc3339()
         );
         let stored = StoredChallenge {
@@ -120,7 +145,17 @@ fn solana_off_chain_message(message: &[u8]) -> Vec<u8> {
 
 fn parse_challenge_id(message: &str) -> Option<String> {
     message.lines().find_map(|line| {
-        line.strip_prefix("challenge:").map(str::trim).map(str::to_string)
+        line.strip_prefix("challenge:")
+            .map(str::trim)
+            .map(str::to_string)
+    })
+}
+
+pub fn parse_delist_listing_id(message: &str) -> Option<uuid::Uuid> {
+    message.lines().find_map(|line| {
+        line.strip_prefix("listing:")
+            .map(str::trim)
+            .and_then(|s| uuid::Uuid::parse_str(s).ok())
     })
 }
 
@@ -137,11 +172,7 @@ fn validate_wallet_pubkey(wallet: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn verify_ed25519_signature(
-    wallet: &str,
-    message: &[u8],
-    signature_b64: &str,
-) -> AppResult<()> {
+fn verify_ed25519_signature(wallet: &str, message: &[u8], signature_b64: &str) -> AppResult<()> {
     let pubkey_bytes = bs58::decode(wallet)
         .into_vec()
         .map_err(|_| AppError::Forbidden("invalid seller_wallet".into()))?;
@@ -205,5 +236,20 @@ mod tests {
         let sig_b64 = base64::engine::general_purpose::STANDARD.encode(signature.to_bytes());
         auth.verify_and_consume(&wallet, &crlf, &sig_b64)
             .expect("verify crlf");
+    }
+
+    #[test]
+    fn delist_challenge_round_trip() {
+        let auth = SellerAuth::default();
+        let seed = [11u8; 32];
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
+        let wallet = bs58::encode(signing_key.verifying_key().to_bytes()).into_string();
+        let listing_id = uuid::Uuid::new_v4();
+        let (message, _expires) = auth.issue_delist_challenge(&wallet, listing_id).unwrap();
+        assert_eq!(parse_delist_listing_id(&message), Some(listing_id));
+        let signature = signing_key.sign(message.as_bytes());
+        let sig_b64 = base64::engine::general_purpose::STANDARD.encode(signature.to_bytes());
+        auth.verify_and_consume(&wallet, &message, &sig_b64)
+            .expect("verify delist");
     }
 }

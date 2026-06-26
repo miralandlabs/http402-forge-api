@@ -40,6 +40,19 @@ components:
       properties:
         message: { type: string }
         expiresAt: { type: string, format: date-time }
+    DelistRequest:
+      type: object
+      required: [seller_wallet, seller_challenge, seller_signature]
+      properties:
+        seller_wallet:
+          type: string
+          description: Listing owner pubkey (base58); must match signed challenge
+        seller_challenge:
+          type: string
+          description: Exact message from GET /api/v1/seller/delist-challenge
+        seller_signature:
+          type: string
+          description: Base64 ed25519 signature over seller_challenge
     SellerStatus:
       type: object
       properties:
@@ -103,6 +116,42 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ValidationError" }
+  /api/v1/seller/delist-challenge:
+    get:
+      summary: Issue a one-time challenge to soft-delist a listing
+      description: |
+        Challenge message binds seller wallet and listing id. Only the listing owner
+        may obtain a challenge. Listing must be active.
+      parameters:
+        - in: query
+          name: seller_wallet
+          required: true
+          schema: { type: string }
+        - in: query
+          name: listing_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Challenge message to sign with seller wallet
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SellerChallenge" }
+        "403":
+          description: Not listing owner
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorBody" }
+        "404":
+          description: Listing not found or not active
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorBody" }
+        "422":
+          description: Invalid wallet or listing_id
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ValidationError" }
   /api/v1/seller/status:
     get:
       summary: Seller SplitVault activation status
@@ -151,6 +200,10 @@ paths:
           name: q
           description: Search title or description (case-insensitive, max 80 chars)
           schema: { type: string, maxLength: 80 }
+        - in: query
+          name: seller_wallet
+          description: Filter by seller wallet (exact base58 pubkey match)
+          schema: { type: string }
         - in: query
           name: category
           schema:
@@ -225,7 +278,7 @@ paths:
               schema: { $ref: "#/components/schemas/ValidationError" }
   /api/v1/listings/{id}:
     get:
-      summary: Get one listing
+      summary: Get one active listing
       parameters:
         - in: path
           name: id
@@ -237,12 +290,48 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ListingPublic" }
         "404":
+          description: Not found or listing removed from catalog
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorBody" }
+    delete:
+      summary: Soft-delist listing (seller-signed)
+      description: |
+        Sets listing status to `removed`. Hidden from catalog and preview.
+        Does not delete storage objects. Requires seller wallet signature
+        matching the listing owner. Prior buyers may still re-download via
+        PAYMENT-SIGNATURE idempotency on GET …/download.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DelistRequest" }
+      responses:
+        "204":
+          description: Listing removed from catalog
+        "403":
+          description: Invalid signature, challenge mismatch, or not listing owner
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorBody" }
+        "404":
+          description: Listing not found, not owner, or already removed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorBody" }
+        "422":
+          description: Invalid wallet
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ValidationError" }
   /api/v1/listings/{id}/preview:
     get:
-      summary: Free preview (image bytes, text snippet, or uploaded preview)
+      summary: Free preview (active listings only)
       parameters:
         - in: path
           name: id
@@ -252,12 +341,17 @@ paths:
         "200":
           description: Preview bytes (Content-Type varies)
         "404":
+          description: Not found or listing removed from catalog
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorBody" }
   /api/v1/listings/{id}/download:
     get:
       summary: Pay-to-download (402 then streamed asset)
+      description: |
+        Active listings return 402 without PAYMENT-SIGNATURE, then 200 after payment.
+        Removed listings return 404 for new purchases. Buyers with a prior payment
+        proof may retry with the same PAYMENT-SIGNATURE header (idempotency).
       parameters:
         - in: path
           name: id
@@ -269,12 +363,17 @@ paths:
           description: Base64 JSON proof from facilitator build+sign flow
       responses:
         "402":
-          description: Payment required
+          description: Payment required (active listing only)
           content:
             application/json:
               schema: { $ref: "#/components/schemas/PaymentRequired" }
         "200":
           description: Asset file stream
+        "404":
+          description: Listing removed and no prior payment idempotency match
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorBody" }
         "403":
           content:
             application/json:

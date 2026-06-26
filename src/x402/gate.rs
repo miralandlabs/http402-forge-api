@@ -177,6 +177,51 @@ impl PaymentGate {
         })
     }
 
+    pub async fn check_download_active_or_paid(
+        state: &AppState,
+        headers: &HeaderMap,
+        listing: &ListingRow,
+        canonical_path: &str,
+    ) -> AppResult<PaymentContext> {
+        if listing.status == "active" {
+            return Self::check_download(state, headers, listing, canonical_path).await;
+        }
+        Self::check_delisted_redownload(state, headers, canonical_path).await
+    }
+
+    async fn check_delisted_redownload(
+        state: &AppState,
+        headers: &HeaderMap,
+        canonical_path: &str,
+    ) -> AppResult<PaymentContext> {
+        let raw = extract_payment_header_value(|name| {
+            headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        });
+        let Some(raw) = raw else {
+            return Err(AppError::NotFound);
+        };
+        let proof = parse_payment_header(&raw).map_err(|_| AppError::NotFound)?;
+        let sig = proof
+            .get("paymentPayload")
+            .and_then(|p| p.pointer("/payload/transaction"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(&raw)
+            .to_string();
+        let idem = idempotency_key(&sig, canonical_path);
+        let Some(existing) = state.db.find_by_idempotency(&idem).await? else {
+            return Err(AppError::NotFound);
+        };
+        Ok(PaymentContext {
+            payer_wallet: existing.buyer_wallet,
+            payment_signature: existing.tx_signature,
+            settle_proof: json!({}),
+            already_paid: true,
+        })
+    }
+
     pub fn attach_payment_response(mut response: Response, settle: &Value) -> Response {
         let encoded = encode_payment_response(settle);
         if let Ok(header) = encoded.parse() {

@@ -1,6 +1,6 @@
 # http402-forge-api
 
-Backend for [http402.trade](https://http402.trade) — digital goods marketplace with pr402 pay-to-download.
+Backend for [http402.trade](https://http402.trade) — Hashspace digital goods marketplace with pr402 pay-to-download.
 
 ## Quick start (local)
 

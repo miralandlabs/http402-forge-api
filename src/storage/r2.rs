@@ -79,17 +79,24 @@ impl ObjectStore for R2Storage {
     }
 
     async fn get(&self, key: &str) -> AppResult<(Bytes, String)> {
+        let content_type = self.content_type_for(key).await?;
         let response = self
             .bucket
             .get_object(key)
             .await
             .map_err(|e| AppError::Storage(e.to_string()))?;
-        let content_type = response
-            .headers()
-            .get("Content-Type")
-            .cloned()
-            .unwrap_or_else(|| "application/octet-stream".to_string());
-        Ok((Bytes::from(response.bytes().to_vec()), content_type))
+        let bytes = response.bytes();
+        if bytes.starts_with(b"<?xml") {
+            let body = String::from_utf8_lossy(bytes);
+            if body.contains("<Error>") {
+                return Err(AppError::Storage(format!("R2 get {key}: {body}")));
+            }
+        }
+        Ok((Bytes::from(bytes.to_vec()), content_type))
+    }
+
+    async fn head(&self, key: &str) -> AppResult<String> {
+        self.content_type_for(key).await
     }
 
     async fn stream(&self, key: &str) -> AppResult<(ByteStream, String)> {
@@ -113,7 +120,7 @@ impl ObjectStore for R2Storage {
         }
         let stream = response
             .bytes_stream()
-            .map(|chunk| chunk.map_err(|e| std::io::Error::other(e)));
+            .map(|chunk| chunk.map_err(std::io::Error::other));
         Ok((Box::pin(stream), content_type))
     }
 }

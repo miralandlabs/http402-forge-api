@@ -6,6 +6,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
 use crate::models::validate_wallet;
@@ -53,6 +54,35 @@ pub async fn challenge(
     Query(q): Query<SellerWalletQuery>,
 ) -> AppResult<impl axum::response::IntoResponse> {
     let (message, expires_at) = state.seller_auth.issue_challenge(&q.seller_wallet)?;
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(ChallengeResponse {
+            message,
+            expires_at,
+        }),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DelistChallengeQuery {
+    pub seller_wallet: String,
+    pub listing_id: String,
+}
+
+pub async fn delist_challenge(
+    State(state): State<SharedState>,
+    Query(q): Query<DelistChallengeQuery>,
+) -> AppResult<impl axum::response::IntoResponse> {
+    validate_wallet(&q.seller_wallet).map_err(|m| AppError::validation("seller_wallet", m))?;
+    let listing_id = Uuid::parse_str(q.listing_id.trim())
+        .map_err(|_| AppError::validation("listing_id", "invalid uuid"))?;
+    let row = state.db.get_listing(listing_id).await?;
+    if row.seller_wallet != q.seller_wallet {
+        return Err(AppError::Forbidden("not listing owner".into()));
+    }
+    let (message, expires_at) = state
+        .seller_auth
+        .issue_delist_challenge(&q.seller_wallet, listing_id)?;
     Ok((
         [(header::CACHE_CONTROL, "no-store")],
         Json(ChallengeResponse {

@@ -31,10 +31,15 @@ pub async fn generate_pdf_first_page_jpeg(data: &Bytes, config: &AppConfig) -> A
         Err(e1) => match try_mutool(&input, dir.path(), config).await {
             Ok(path) => path,
             Err(e2) => try_ghostscript(&input, dir.path(), config).await.map_err(|e3| {
-                AppError::BadRequest(format!(
-                    "PDF preview failed (install poppler, mupdf, or ghostscript). \
-                     pdftoppm: {e1}; mutool: {e2}; gs: {e3}"
-                ))
+                tracing::warn!(
+                    pdftoppm = %e1,
+                    mutool = %e2,
+                    ghostscript = %e3,
+                    "PDF auto-preview failed"
+                );
+                AppError::BadRequest(
+                    "Could not generate a preview from this PDF. Upload an optional preview image, or try a different file.".into(),
+                )
             })?,
         },
     };
@@ -62,16 +67,9 @@ pub async fn generate_media_clip(
     let secs = config.preview_media_seconds.to_string();
     let audio_only = content_type.starts_with("audio/");
 
-    let copy_ok = run_ffmpeg(
-        &config.ffmpeg_bin,
-        &input,
-        &output,
-        &secs,
-        true,
-        audio_only,
-    )
-    .await
-    .is_ok();
+    let copy_ok = run_ffmpeg(&config.ffmpeg_bin, &input, &output, &secs, true, audio_only)
+        .await
+        .is_ok();
 
     if !copy_ok {
         run_ffmpeg(
@@ -104,7 +102,7 @@ pub async fn generate_media_clip(
 
     Ok((
         Bytes::from(clip),
-        media_output_content_type(content_type, &out_ext),
+        media_output_content_type(content_type, out_ext),
     ))
 }
 
@@ -117,6 +115,7 @@ async fn try_pdftoppm(input: &Path, dir: &Path, config: &AppConfig) -> AppResult
     let status = Command::new(&config.pdftoppm_bin)
         .args([
             "-jpeg",
+            "-singlefile",
             "-f",
             "1",
             "-l",
@@ -193,12 +192,25 @@ async fn try_ghostscript(input: &Path, dir: &Path, config: &AppConfig) -> AppRes
 
 fn find_first_jpeg(dir: &Path, prefix: &str) -> AppResult<PathBuf> {
     for candidate in [
+        dir.join(format!("{prefix}.jpg")),
+        dir.join(format!("{prefix}.jpeg")),
         dir.join(format!("{prefix}-1.jpg")),
         dir.join(format!("{prefix}-01.jpg")),
-        dir.join(format!("{prefix}.jpg")),
+        dir.join(format!("{prefix}-001.jpg")),
     ] {
         if candidate.exists() {
             return Ok(candidate);
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+                continue;
+            };
+            if ext.eq_ignore_ascii_case("jpg") || ext.eq_ignore_ascii_case("jpeg") {
+                return Ok(path);
+            }
         }
     }
     Err(AppError::BadRequest(
@@ -215,16 +227,9 @@ async fn run_ffmpeg(
     audio_only: bool,
 ) -> AppResult<()> {
     let mut cmd = Command::new(bin);
-    cmd.args([
-        "-nostdin",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-y",
-        "-i",
-    ])
-    .arg(input)
-    .args(["-t", secs]);
+    cmd.args(["-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i"])
+        .arg(input)
+        .args(["-t", secs]);
 
     if stream_copy {
         cmd.arg("-c").arg("copy");
