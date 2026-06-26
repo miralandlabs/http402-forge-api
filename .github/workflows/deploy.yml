@@ -14,6 +14,7 @@ jobs:
   deploy:
     name: API → VPS (Docker)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     env:
       FORGE_VPS_REPO_PATH: ${{ secrets.FORGE_VPS_REPO_PATH }}
     steps:
@@ -33,6 +34,7 @@ jobs:
           host: ${{ secrets.FORGE_VPS_HOST }}
           username: ${{ secrets.FORGE_VPS_USER }}
           key: ${{ secrets.FORGE_VPS_SSH_KEY }}
+          command_timeout: 40m
           script_stop: true
           envs: CLUSTER,FORGE_VPS_REPO_PATH
           script: |
