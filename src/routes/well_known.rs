@@ -34,10 +34,6 @@ pub async fn x402_resources(State(state): State<SharedState>) -> Json<serde_json
             "leaderboards": format!("{base}/api/v1/leaderboards")
         },
         "agentTooling": {
-            "paymentSdk": {
-                "npm": "@pr402/buyer-typescript",
-                "url": "https://www.npmjs.com/package/@pr402/buyer-typescript"
-            },
             "forgeSdk": {
                 "npm": "@http402/forge-client",
                 "url": "https://www.npmjs.com/package/@http402/forge-client",
