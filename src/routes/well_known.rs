@@ -33,6 +33,32 @@ pub async fn x402_resources(State(state): State<SharedState>) -> Json<serde_json
             "events": format!("{base}/api/v1/events"),
             "leaderboards": format!("{base}/api/v1/leaderboards")
         },
+        "agentTooling": {
+            "paymentSdk": {
+                "npm": "@pr402/buyer-typescript",
+                "url": "https://www.npmjs.com/package/@pr402/buyer-typescript"
+            },
+            "forgeSdk": {
+                "npm": "@http402/forge-client",
+                "url": "https://www.npmjs.com/package/@http402/forge-client",
+                "install": "npm install @http402/forge-client"
+            },
+            "cli": {
+                "npm": "@http402/forge-cli",
+                "bin": "forge",
+                "url": "https://www.npmjs.com/package/@http402/forge-cli",
+                "install": "npm install -g @http402/forge-cli",
+                "run": "npx @http402/forge-cli list --pretty"
+            },
+            "mcp": {
+                "npm": "@http402/forge-mcp",
+                "bin": "forge-mcp",
+                "url": "https://www.npmjs.com/package/@http402/forge-mcp",
+                "run": "npx -y @http402/forge-mcp",
+                "configExample": "https://github.com/miraland-labs/x402-buyer-starter/blob/main/examples/mcp/forge-cursor-mcp.json"
+            },
+            "agentApiUrl": "https://github.com/miralandlabs/http402-forge-api/blob/main/docs/AGENT_API.md"
+        },
         "resources": [
             {
                 "url": format!("{base}/api/v1/listings/{{id}}/download"),

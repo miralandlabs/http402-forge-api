@@ -8,6 +8,8 @@ info:
 
     **Agents:** start at `GET https://http402.trade/.well-known/x402-portal.json` for the
     http402.trade channel router. Forge API discovery: `GET /.well-known/x402-resources.json`.
+    npm tooling: `@http402/forge-cli`, `@http402/forge-client`, `@http402/forge-mcp`;
+    payment rail: `@pr402/buyer-typescript`.
     Human-written guide: [AGENT_API.md](https://github.com/miralandlabs/http402-forge-api/blob/main/docs/AGENT_API.md).
 servers:
   - url: https://forge.http402.trade
@@ -176,6 +178,41 @@ paths:
           content:
             application/yaml:
               schema: { type: string }
+  /api/v1/capabilities:
+    get:
+      summary: Server capabilities (presigned upload/download, delivery mode)
+      responses:
+        "200":
+          description: Capabilities JSON (camelCase)
+  /api/v1/listings/upload-session:
+    post:
+      summary: Start presigned R2 upload session (seller-signed)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sellerWallet, sellerChallenge, sellerSignature, assetContentType, assetByteSize]
+      responses:
+        "200":
+          description: Presigned PUT targets + listingId
+  /api/v1/listings/complete-upload:
+    post:
+      summary: Finalize presigned upload and publish listing
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [listingId, sellerWallet, sellerChallenge, sellerSignature, title, category, priceUsdc]
+      responses:
+        "201":
+          description: Published listing
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ListingPublic" }
   /api/v1/seller/challenge:
     get:
       summary: Issue a one-time challenge for listing creation

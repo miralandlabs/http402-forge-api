@@ -45,6 +45,64 @@ GET {FORGE_API}/api/v1/listings/{id}/download
 
 First request returns **402** with `accepts[]`. Build and sign via pr402, then retry with `PAYMENT-SIGNATURE`.
 
+## Agent tooling (npm)
+
+Published packages — no monorepo clone required. Resolve `{FORGE_API}` from `GET https://http402.trade/.well-known/x402-portal.json` (`environments.*.forgeApi`).
+
+| Package | npm | Role |
+|---------|-----|------|
+| `@pr402/buyer-typescript` | [npm](https://www.npmjs.com/package/@pr402/buyer-typescript) | Payment rail (`createPay402Fetch`, exact flow) |
+| `@http402/forge-client` | [npm](https://www.npmjs.com/package/@http402/forge-client) | Forge SDK (buy, publish, delist, vault) |
+| `@http402/forge-cli` | [npm](https://www.npmjs.com/package/@http402/forge-cli) | CLI binary `forge` |
+| `@http402/forge-mcp` | [npm](https://www.npmjs.com/package/@http402/forge-mcp) | MCP tools for Cursor / Claude Desktop |
+
+**CLI (recommended):**
+
+```bash
+npm install -g @http402/forge-cli
+# or one-shot:
+npx @http402/forge-cli list --pretty
+
+export FORGE_API_BASE=https://preview.forge.http402.trade
+export FACILITATOR_BASE=https://preview.ipay.sh
+export FORGE_KEYPAIR=/path/to/keypair.json
+
+forge list --agent-friendly --pretty
+forge buy <listing-uuid> --verify
+forge publish --asset ./file.pdf --title "My PDF" --price 0.05
+forge vault status
+```
+
+**SDK:**
+
+```bash
+npm install @http402/forge-client
+```
+
+```typescript
+import { forgeSearch, forgeBuy } from '@http402/forge-client';
+```
+
+**MCP** — copy to `.cursor/mcp.json` or Claude Desktop config:
+
+```json
+{
+  "mcpServers": {
+    "forge": {
+      "command": "npx",
+      "args": ["-y", "@http402/forge-mcp"],
+      "env": {
+        "FORGE_API_BASE": "https://preview.forge.http402.trade",
+        "FACILITATOR_BASE": "https://preview.ipay.sh",
+        "FORGE_KEYPAIR": "/absolute/path/to/keypair.json"
+      }
+    }
+  }
+}
+```
+
+Example config: [x402-buyer-starter/examples/mcp/forge-cursor-mcp.json](https://github.com/miraland-labs/x402-buyer-starter/blob/main/examples/mcp/forge-cursor-mcp.json).
+
 **Marketplace entry (x402):** `GET /.well-known/x402-resources.json` on this host describes the download URL *pattern* (`{id}` placeholder). It is not a full SKU manifest — use `GET /listings` to enumerate inventory.
 
 **Prompt / agent-oriented assets:** filter with `agent_friendly=true` and `category=prompt_pack`.
@@ -139,6 +197,47 @@ Content-Type: multipart/form-data
 | Other | Text placeholder |
 
 Dev-only bypass: set `SKIP_SELLER_AUTH=1` on the API (never in production).
+
+**Recommended agent tooling:** [`@http402/forge-cli`](https://github.com/miralandlabs/http402-forge-cli) (`forge publish`, `forge buy`, …) and [`@http402/forge-client`](https://github.com/miralandlabs/http402-forge-cli/tree/main/packages/forge-client) SDK — auto-selects upload strategy below.
+
+### Presigned upload (production / R2)
+
+When `GET /api/v1/capabilities` returns `presignedUpload: true`, prefer direct-to-R2 upload (avoids streaming large files through the API):
+
+1. Same seller challenge + signature as multipart.
+2. `POST /api/v1/listings/upload-session` (JSON, **camelCase**):
+
+```json
+{
+  "sellerWallet": "...",
+  "sellerChallenge": "...",
+  "sellerSignature": "...",
+  "assetContentType": "application/pdf",
+  "assetByteSize": 1048576,
+  "previewContentType": "image/png",
+  "previewByteSize": 4096
+}
+```
+
+3. `PUT` asset bytes to `response.asset.url` with returned headers; optional `PUT` preview to `response.preview.url`.
+4. `POST /api/v1/listings/complete-upload` (JSON, **camelCase**):
+
+```json
+{
+  "listingId": "uuid-from-upload-session",
+  "sellerWallet": "...",
+  "sellerChallenge": "...",
+  "sellerSignature": "...",
+  "title": "...",
+  "description": "...",
+  "category": "art",
+  "priceUsdc": "0.05",
+  "agentFriendly": true,
+  "previewUploaded": true
+}
+```
+
+Returns `201` with listing JSON (camelCase). Challenge is consumed on complete-upload.
 
 ## Delist listing (agent)
 
@@ -297,7 +396,7 @@ List/detail JSON may include `qualityScore` (0–100 average from outcomes) and 
 
 One feedback row per `sale_id` (**409** on duplicate). Dev bypass: `SKIP_BUYER_AUTH=1`.
 
-TypeScript helpers: `verifyListingContent`, `forgeSaleFeedback`, `forgeBuy({ autoFeedback: true, buyerKeypair, buyerWallet })` in `x402-buyer-starter`.
+TypeScript helpers: `verifyListingContent`, `forgeSaleFeedback`, `forgeBuy({ autoFeedback: true, buyerKeypair, buyerWallet })` in **`@http402/forge-client`** ([npm](https://www.npmjs.com/package/@http402/forge-client)).
 
 ## Content moderation (upload)
 
@@ -309,5 +408,6 @@ Before storage, uploads may be scanned when `MODERATION_PROVIDER=openai` (requir
 2. **Forge payable template:** `GET {FORGE_API}/.well-known/x402-resources.json` — download URL pattern (`{id}` placeholder) plus `agentDiscovery.catalog`.
 3. **Product inventory:** `GET {FORGE_API}/api/v1/listings` — enumerate SKUs (not in x402-resources alone).
 4. **OpenAPI:** `GET {FORGE_API}/openapi.yaml` — full HTTP shape for codegen.
+5. **CLI (recommended):** `@http402/forge-cli` on npm — `npx @http402/forge-cli list`, `forge buy`, `forge publish`, `forge delist`, `forge vault status`. See **Agent tooling (npm)** above.
 
 Register payable download URLs via pr402 seller manifests using the resource template from step 2. Enumerate products with step 3 — see **Agent discovery** above.
