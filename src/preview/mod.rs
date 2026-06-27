@@ -50,6 +50,49 @@ pub async fn generate_pdf_first_page_jpeg(data: &Bytes, config: &AppConfig) -> A
     thumbnail_jpeg(Bytes::from(raw), 400)
 }
 
+/// Extract a page-limited PDF sample (default: page 1 only) for detail-page embeds.
+pub async fn generate_pdf_page_sample(data: &Bytes, config: &AppConfig) -> AppResult<Bytes> {
+    let dir = temp_dir()?;
+    let input = dir.path().join("input.pdf");
+    let output = dir.path().join("sample.pdf");
+    tokio::fs::write(&input, data)
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?;
+
+    let status = Command::new(&config.gs_bin)
+        .args([
+            "-dSAFER",
+            "-dBATCH",
+            "-dNOPAUSE",
+            "-sDEVICE=pdfwrite",
+            "-dFirstPage=1",
+            "-dLastPage=1",
+            &format!("-sOutputFile={}", output.display()),
+        ])
+        .arg(&input)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| AppError::BadRequest(format!("ghostscript not runnable: {e}")))?;
+
+    if !status.status.success() {
+        return Err(AppError::BadRequest(
+            String::from_utf8_lossy(&status.stderr).trim().to_string(),
+        ));
+    }
+
+    let sample = tokio::fs::read(&output)
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?;
+    if sample.is_empty() {
+        return Err(AppError::BadRequest(
+            "PDF sample extraction produced empty output".into(),
+        ));
+    }
+    Ok(Bytes::from(sample))
+}
+
 pub async fn generate_media_clip(
     data: &Bytes,
     content_type: &str,

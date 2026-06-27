@@ -11,6 +11,8 @@ use crate::error::{AppError, AppResult};
 
 const CHALLENGE_PREFIX: &str = "http402-forge:create-listing:v1";
 const DELIST_CHALLENGE_PREFIX: &str = "http402-forge:delist-listing:v1";
+const FEEDBACK_CHALLENGE_PREFIX: &str = "http402-forge:sale-feedback:v1";
+const REDOWNLOAD_CHALLENGE_PREFIX: &str = "http402-forge:redownload:v1";
 const CHALLENGE_TTL: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Clone)]
@@ -20,9 +22,16 @@ pub struct StoredChallenge {
     pub expires_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone)]
+struct PendingUpload {
+    seller_wallet: String,
+    expires_at: DateTime<Utc>,
+}
+
 #[derive(Default)]
 pub struct SellerAuth {
     pending: Mutex<HashMap<String, StoredChallenge>>,
+    pending_uploads: Mutex<HashMap<Uuid, PendingUpload>>,
 }
 
 impl SellerAuth {
@@ -70,11 +79,79 @@ impl SellerAuth {
         Ok((message, expires_at))
     }
 
+    pub fn issue_feedback_challenge(
+        &self,
+        wallet: &str,
+        sale_id: uuid::Uuid,
+    ) -> AppResult<(String, DateTime<Utc>)> {
+        validate_wallet_pubkey(wallet).map_err(|m| AppError::validation("buyer_wallet", m))?;
+        let id = Uuid::new_v4().to_string();
+        let expires_at = Utc::now() + chrono::Duration::seconds(CHALLENGE_TTL.as_secs() as i64);
+        let message = format!(
+            "{FEEDBACK_CHALLENGE_PREFIX}\nwallet:{wallet}\nsale:{sale_id}\nchallenge:{id}\nexpires:{}",
+            expires_at.to_rfc3339()
+        );
+        let stored = StoredChallenge {
+            wallet: wallet.to_string(),
+            message: message.clone(),
+            expires_at,
+        };
+        self.pending
+            .lock()
+            .expect("seller auth lock")
+            .insert(id, stored);
+        Ok((message, expires_at))
+    }
+
+    pub fn issue_redownload_challenge(
+        &self,
+        wallet: &str,
+        listing_id: uuid::Uuid,
+    ) -> AppResult<(String, DateTime<Utc>)> {
+        validate_wallet_pubkey(wallet).map_err(|m| AppError::validation("buyer_wallet", m))?;
+        let id = Uuid::new_v4().to_string();
+        let expires_at = Utc::now() + chrono::Duration::seconds(CHALLENGE_TTL.as_secs() as i64);
+        let message = format!(
+            "{REDOWNLOAD_CHALLENGE_PREFIX}\nwallet:{wallet}\nlisting:{listing_id}\nchallenge:{id}\nexpires:{}",
+            expires_at.to_rfc3339()
+        );
+        let stored = StoredChallenge {
+            wallet: wallet.to_string(),
+            message: message.clone(),
+            expires_at,
+        };
+        self.pending
+            .lock()
+            .expect("seller auth lock")
+            .insert(id, stored);
+        Ok((message, expires_at))
+    }
+
     pub fn verify_and_consume(
         &self,
         wallet: &str,
         challenge_message: &str,
         signature_b64: &str,
+    ) -> AppResult<()> {
+        self.verify_challenge(wallet, challenge_message, signature_b64, true)
+    }
+
+    /// Validates a seller challenge signature without removing it (for multi-step flows).
+    pub fn verify_without_consume(
+        &self,
+        wallet: &str,
+        challenge_message: &str,
+        signature_b64: &str,
+    ) -> AppResult<()> {
+        self.verify_challenge(wallet, challenge_message, signature_b64, false)
+    }
+
+    fn verify_challenge(
+        &self,
+        wallet: &str,
+        challenge_message: &str,
+        signature_b64: &str,
+        consume: bool,
     ) -> AppResult<()> {
         validate_wallet_pubkey(wallet).map_err(|m| AppError::validation("seller_wallet", m))?;
         if challenge_message.trim().is_empty() {
@@ -96,9 +173,19 @@ impl SellerAuth {
 
         let stored = {
             let mut pending = self.pending.lock().expect("seller auth lock");
-            pending.remove(&challenge_id).ok_or_else(|| {
-                AppError::Forbidden("challenge expired or already used — request a new one".into())
-            })?
+            if consume {
+                pending.remove(&challenge_id).ok_or_else(|| {
+                    AppError::Forbidden(
+                        "challenge expired or already used — request a new one".into(),
+                    )
+                })?
+            } else {
+                pending.get(&challenge_id).cloned().ok_or_else(|| {
+                    AppError::Forbidden(
+                        "challenge expired or already used — request a new one".into(),
+                    )
+                })?
+            }
         };
 
         if stored.wallet != wallet {
@@ -116,6 +203,46 @@ impl SellerAuth {
         }
 
         verify_ed25519_signature(wallet, challenge_message.as_bytes(), signature_b64)?;
+        Ok(())
+    }
+
+    /// Binds a presigned upload session to the authenticated seller wallet.
+    pub fn register_upload_session(
+        &self,
+        listing_id: Uuid,
+        seller_wallet: &str,
+        expires_at: DateTime<Utc>,
+    ) {
+        self.pending_uploads
+            .lock()
+            .expect("seller auth lock")
+            .insert(
+                listing_id,
+                PendingUpload {
+                    seller_wallet: seller_wallet.to_string(),
+                    expires_at,
+                },
+            );
+    }
+
+    /// Ensures `complete-upload` is issued by the same seller that opened the session.
+    pub fn consume_upload_session(&self, listing_id: Uuid, seller_wallet: &str) -> AppResult<()> {
+        let mut uploads = self.pending_uploads.lock().expect("seller auth lock");
+        let stored = uploads.get(&listing_id).ok_or_else(|| {
+            AppError::Forbidden(
+                "unknown or expired upload session — start a new upload-session".into(),
+            )
+        })?;
+        if stored.seller_wallet != seller_wallet {
+            return Err(AppError::Forbidden(
+                "upload session seller_wallet mismatch".into(),
+            ));
+        }
+        if Utc::now() > stored.expires_at {
+            uploads.remove(&listing_id);
+            return Err(AppError::Forbidden("upload session expired".into()));
+        }
+        uploads.remove(&listing_id);
         Ok(())
     }
 }
@@ -157,6 +284,18 @@ pub fn parse_delist_listing_id(message: &str) -> Option<uuid::Uuid> {
             .map(str::trim)
             .and_then(|s| uuid::Uuid::parse_str(s).ok())
     })
+}
+
+pub fn parse_feedback_sale_id(message: &str) -> Option<uuid::Uuid> {
+    message.lines().find_map(|line| {
+        line.strip_prefix("sale:")
+            .map(str::trim)
+            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+    })
+}
+
+pub fn parse_redownload_listing_id(message: &str) -> Option<uuid::Uuid> {
+    parse_delist_listing_id(message)
 }
 
 fn validate_wallet_pubkey(wallet: &str) -> Result<(), String> {
@@ -251,5 +390,44 @@ mod tests {
         let sig_b64 = base64::engine::general_purpose::STANDARD.encode(signature.to_bytes());
         auth.verify_and_consume(&wallet, &message, &sig_b64)
             .expect("verify delist");
+    }
+
+    #[test]
+    fn redownload_challenge_round_trip() {
+        let auth = SellerAuth::default();
+        let seed = [13u8; 32];
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
+        let wallet = bs58::encode(signing_key.verifying_key().to_bytes()).into_string();
+        let listing_id = uuid::Uuid::new_v4();
+        let (message, _expires) = auth
+            .issue_redownload_challenge(&wallet, listing_id)
+            .unwrap();
+        assert_eq!(parse_redownload_listing_id(&message), Some(listing_id));
+        let signature = signing_key.sign(message.as_bytes());
+        let sig_b64 = base64::engine::general_purpose::STANDARD.encode(signature.to_bytes());
+        auth.verify_and_consume(&wallet, &message, &sig_b64)
+            .expect("verify redownload");
+    }
+
+    #[test]
+    fn upload_session_binds_seller_on_complete() {
+        let auth = SellerAuth::default();
+        let listing_id = uuid::Uuid::new_v4();
+        let expires_at = Utc::now() + chrono::Duration::seconds(300);
+        auth.register_upload_session(listing_id, "sellerA", expires_at);
+        auth.consume_upload_session(listing_id, "sellerA")
+            .expect("owner completes");
+        assert!(auth.consume_upload_session(listing_id, "sellerA").is_err());
+    }
+
+    #[test]
+    fn upload_session_rejects_wrong_seller() {
+        let auth = SellerAuth::default();
+        let listing_id = uuid::Uuid::new_v4();
+        let expires_at = Utc::now() + chrono::Duration::seconds(300);
+        auth.register_upload_session(listing_id, "sellerA", expires_at);
+        assert!(auth.consume_upload_session(listing_id, "sellerB").is_err());
+        auth.consume_upload_session(listing_id, "sellerA")
+            .expect("owner still valid after failed hijack");
     }
 }

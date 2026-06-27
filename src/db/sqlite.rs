@@ -6,16 +6,19 @@ use rusqlite::{params, Row};
 use uuid::Uuid;
 
 use super::{LeaderboardListingRow, LeaderboardWalletRow, ListingRow, PaymentRow, SaleRow};
+use super::trust::{ListingQualityStats, SaleFeedbackRow};
 use crate::db::listing_filters::{listing_filter_suffix, ListingFilterBinds};
 use crate::error::{AppError, AppResult};
 
 const SCHEMA: &str = include_str!("../../migrations/sqlite/001_init.sql");
 const SCHEMA_002: &str = include_str!("../../migrations/sqlite/002_agent_metadata.sql");
 const SCHEMA_003: &str = include_str!("../../migrations/sqlite/003_preview_content_type.sql");
+const SCHEMA_004: &str = include_str!("../../migrations/sqlite/004_trust_moderation.sql");
 
 const LISTING_COLUMNS: &str = "id, seller_wallet, display_name, title, description, category,
                         price_micro_usdc, preview_key, preview_content_type, asset_key, content_type, byte_size,
-                        agent_friendly, delivery_scheme, status, tags, license, content_hash, created_at";
+                        agent_friendly, delivery_scheme, status, tags, license, content_hash,
+                        moderation_status, moderation_labels, created_at";
 
 fn configure_sqlite_connection(conn: &mut rusqlite::Connection) -> rusqlite::Result<()> {
     conn.busy_timeout(Duration::from_millis(10_000))?;
@@ -116,6 +119,25 @@ pub async fn migrate(pool: &Pool) -> AppResult<()> {
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite interact: {e}")))?
         .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite migrate 003: {e}")))?;
+
+    let sql4 = SCHEMA_004.to_string();
+    pool.get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite conn: {e}")))?
+        .interact(move |conn| {
+            for stmt in sql4.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+                if let Err(e) = conn.execute(stmt, []) {
+                    let msg = e.to_string();
+                    if !msg.contains("duplicate column") {
+                        return Err(e);
+                    }
+                }
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite interact: {e}")))?
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite migrate 004: {e}")))?;
     Ok(())
 }
 
@@ -147,8 +169,9 @@ pub async fn insert_listing(pool: &Pool, row: &ListingRow) -> AppResult<()> {
                 INSERT INTO listings (
                     id, seller_wallet, display_name, title, description, category,
                     price_micro_usdc, preview_key, preview_content_type, asset_key, content_type, byte_size,
-                    agent_friendly, delivery_scheme, status, tags, license, content_hash, created_at
-                ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)
+                    agent_friendly, delivery_scheme, status, tags, license, content_hash,
+                    moderation_status, moderation_labels, created_at
+                ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)
                 "#,
                 params![
                     row.id.to_string(),
@@ -169,6 +192,8 @@ pub async fn insert_listing(pool: &Pool, row: &ListingRow) -> AppResult<()> {
                     row.tags,
                     row.license,
                     row.content_hash,
+                    row.moderation_status,
+                    row.moderation_labels,
                     row.created_at.to_rfc3339(),
                 ],
             )
@@ -296,6 +321,7 @@ pub async fn list_listings(
         "price_desc" => "price_micro_usdc DESC, created_at DESC",
         "newest" => "created_at DESC",
         "trending" => "(SELECT COUNT(*) FROM sales s WHERE s.listing_id = listings.id AND s.settled_at >= datetime('now', '-24 hours')) DESC, created_at DESC",
+        "quality" => "(SELECT CASE WHEN COUNT(*) >= 2 THEN AVG(CASE sf.outcome WHEN 'as_described' THEN 100 WHEN 'hash_mismatch' THEN 0 WHEN 'corrupt' THEN 25 WHEN 'misleading' THEN 35 ELSE 50 END) ELSE NULL END FROM sale_feedback sf WHERE sf.listing_id = listings.id) DESC, created_at DESC",
         _ => "(SELECT COUNT(*) FROM sales s WHERE s.listing_id = listings.id AND s.settled_at >= datetime('now', '-24 hours')) DESC, created_at DESC",
     };
     let sql = format!(
@@ -491,7 +517,9 @@ fn map_listing(row: &Row<'_>) -> rusqlite::Result<ListingRow> {
         tags: row.get(15)?,
         license: row.get(16)?,
         content_hash: row.get(17)?,
-        created_at: parse_datetime(row.get::<_, String>(18)?)?,
+        moderation_status: row.get(18)?,
+        moderation_labels: row.get(19)?,
+        created_at: parse_datetime(row.get::<_, String>(20)?)?,
     })
 }
 
@@ -570,4 +598,207 @@ pub async fn set_preview_content_type(
         .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite interact: {e}")))?
         .map_err(|e| AppError::Internal(anyhow::anyhow!("set preview content type: {e}")))?;
     Ok(())
+}
+
+pub async fn is_content_hash_blocked(pool: &Pool, content_hash: &str) -> AppResult<bool> {
+    let content_hash = content_hash.to_string();
+    pool.get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite conn: {e}")))?
+        .interact(move |conn| -> rusqlite::Result<bool> {
+            let mut stmt =
+                conn.prepare("SELECT 1 FROM blocked_content_hashes WHERE content_hash = ?1")?;
+            let mut rows = stmt.query(params![content_hash])?;
+            Ok(rows.next()?.is_some())
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite interact: {e}")))?
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("hash blocklist: {e}")))
+}
+
+pub async fn get_sale(pool: &Pool, sale_id: Uuid) -> AppResult<SaleRow> {
+    let sale_id = sale_id.to_string();
+    pool.get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite conn: {e}")))?
+        .interact(move |conn| -> rusqlite::Result<Option<SaleRow>> {
+            let mut stmt = conn.prepare(
+                "SELECT id, listing_id, seller_wallet, buyer_wallet, amount_micro_usdc, tx_signature, settled_at
+                 FROM sales WHERE id = ?1",
+            )?;
+            let mut rows = stmt.query(params![sale_id])?;
+            if let Some(row) = rows.next()? {
+                return Ok(Some(map_sale(row)?));
+            }
+            Ok(None)
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite interact: {e}")))?
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("get sale: {e}")))?
+        .ok_or(AppError::NotFound)
+}
+
+pub async fn find_sale_by_payment(
+    pool: &Pool,
+    listing_id: Uuid,
+    buyer_wallet: &str,
+    tx_signature: &str,
+) -> AppResult<Option<SaleRow>> {
+    let listing_id = listing_id.to_string();
+    let buyer_wallet = buyer_wallet.to_string();
+    let tx_signature = tx_signature.to_string();
+    pool.get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite conn: {e}")))?
+        .interact(move |conn| -> rusqlite::Result<Option<SaleRow>> {
+            let mut stmt = conn.prepare(
+                "SELECT id, listing_id, seller_wallet, buyer_wallet, amount_micro_usdc, tx_signature, settled_at
+                 FROM sales
+                 WHERE listing_id = ?1 AND buyer_wallet = ?2 AND tx_signature = ?3
+                 ORDER BY settled_at DESC
+                 LIMIT 1",
+            )?;
+            let mut rows = stmt.query(params![listing_id, buyer_wallet, tx_signature])?;
+            if let Some(row) = rows.next()? {
+                return Ok(Some(map_sale(row)?));
+            }
+            Ok(None)
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite interact: {e}")))?
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("find sale: {e}")))
+}
+
+pub async fn find_buyer_sale_for_listing(
+    pool: &Pool,
+    listing_id: Uuid,
+    buyer_wallet: &str,
+) -> AppResult<Option<SaleRow>> {
+    let listing_id = listing_id.to_string();
+    let buyer_wallet = buyer_wallet.to_string();
+    pool.get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite conn: {e}")))?
+        .interact(move |conn| -> rusqlite::Result<Option<SaleRow>> {
+            let mut stmt = conn.prepare(
+                "SELECT id, listing_id, seller_wallet, buyer_wallet, amount_micro_usdc, tx_signature, settled_at
+                 FROM sales
+                 WHERE listing_id = ?1 AND buyer_wallet = ?2
+                 ORDER BY settled_at DESC
+                 LIMIT 1",
+            )?;
+            let mut rows = stmt.query(params![listing_id, buyer_wallet])?;
+            if let Some(row) = rows.next()? {
+                return Ok(Some(map_sale(row)?));
+            }
+            Ok(None)
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite interact: {e}")))?
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("find buyer sale: {e}")))
+}
+
+pub async fn insert_sale_feedback(
+    pool: &Pool,
+    sale_id: Uuid,
+    listing_id: Uuid,
+    buyer_wallet: &str,
+    outcome: &str,
+    score: Option<i16>,
+    note: Option<&str>,
+) -> AppResult<SaleFeedbackRow> {
+    let sale_id_s = sale_id.to_string();
+    let sale_id_query = sale_id_s.clone();
+    let listing_id_s = listing_id.to_string();
+    let buyer_wallet = buyer_wallet.to_string();
+    let outcome = outcome.to_string();
+    let note = note.map(str::to_string);
+    pool.get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite conn: {e}")))?
+        .interact(move |conn| -> rusqlite::Result<SaleFeedbackRow> {
+            conn.execute(
+                r#"
+                INSERT INTO sale_feedback (sale_id, listing_id, buyer_wallet, outcome, score, note)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                "#,
+                params![sale_id_s, listing_id_s, buyer_wallet, outcome, score, note],
+            )?;
+            let mut stmt = conn.prepare(
+                "SELECT sale_id, listing_id, buyer_wallet, outcome, score, note, created_at
+                 FROM sale_feedback WHERE sale_id = ?1",
+            )?;
+            let mut rows = stmt.query(params![sale_id_query])?;
+            let row = rows.next()?.expect("sale feedback row");
+            map_sale_feedback(row)
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite interact: {e}")))?
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("UNIQUE constraint") {
+                AppError::Conflict("feedback already submitted for this sale".into())
+            } else {
+                AppError::Internal(anyhow::anyhow!("insert sale feedback: {e}"))
+            }
+        })
+}
+
+pub async fn listing_quality_stats(
+    pool: &Pool,
+    listing_ids: &[Uuid],
+) -> AppResult<std::collections::HashMap<Uuid, ListingQualityStats>> {
+    if listing_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let placeholders: String = (1..=listing_ids.len())
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT listing_id,
+                COUNT(*) AS feedback_count,
+                CAST(AVG(CASE outcome
+                  WHEN 'as_described' THEN 100
+                  WHEN 'hash_mismatch' THEN 0
+                  WHEN 'corrupt' THEN 25
+                  WHEN 'misleading' THEN 35
+                  ELSE 50
+                END) AS INTEGER) AS quality_score
+         FROM sale_feedback
+         WHERE listing_id IN ({placeholders})
+         GROUP BY listing_id"
+    );
+    let ids: Vec<String> = listing_ids.iter().map(Uuid::to_string).collect();
+    pool.get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite conn: {e}")))?
+        .interact(move |conn| -> rusqlite::Result<std::collections::HashMap<Uuid, ListingQualityStats>> {
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(ids), |row| {
+                Ok((
+                    parse_uuid(row.get::<_, String>(0)?)?,
+                    ListingQualityStats {
+                        verified_feedback_count: row.get(1)?,
+                        quality_score: row.get(2)?,
+                    },
+                ))
+            })?;
+            rows.collect::<Result<std::collections::HashMap<_, _>, _>>()
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite interact: {e}")))?
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("listing quality stats: {e}")))
+}
+
+fn map_sale_feedback(row: &Row<'_>) -> rusqlite::Result<SaleFeedbackRow> {
+    Ok(SaleFeedbackRow {
+        sale_id: parse_uuid(row.get::<_, String>(0)?)?,
+        listing_id: parse_uuid(row.get::<_, String>(1)?)?,
+        buyer_wallet: row.get(2)?,
+        outcome: row.get(3)?,
+        score: row.get(4)?,
+        note: row.get(5)?,
+        created_at: parse_datetime(row.get::<_, String>(6)?)?,
+    })
 }

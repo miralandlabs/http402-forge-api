@@ -1,8 +1,11 @@
+mod buyer_redownload;
 mod events;
 mod health;
 mod leaderboards;
 mod listings;
+mod listings_upload;
 mod rate_limit;
+mod sale_feedback;
 mod seller;
 mod well_known;
 
@@ -13,7 +16,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
+use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer, ExposeHeaders};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
 
@@ -35,6 +38,15 @@ fn cors_layer(origins: &[String]) -> CorsLayer {
             axum::http::header::CONTENT_TYPE,
             axum::http::header::AUTHORIZATION,
             axum::http::HeaderName::from_static("payment-signature"),
+            axum::http::HeaderName::from_static("x-forge-buyer-wallet"),
+            axum::http::HeaderName::from_static("x-forge-buyer-challenge"),
+            axum::http::HeaderName::from_static("x-forge-buyer-signature"),
+        ]))
+        .expose_headers(ExposeHeaders::list([
+            axum::http::HeaderName::from_static("x-forge-sale-id"),
+            axum::http::HeaderName::from_static("payment-response"),
+            axum::http::HeaderName::from_static("x-forge-delivery"),
+            axum::http::HeaderName::from_static("location"),
         ]))
 }
 
@@ -44,12 +56,32 @@ pub fn router(state: SharedState) -> Router {
 
     let limited = Router::new()
         .route(
+            "/api/v1/listings/upload-session",
+            post(listings_upload::upload_session),
+        )
+        .route(
+            "/api/v1/listings/complete-upload",
+            post(listings_upload::complete_upload),
+        )
+        .route("/api/v1/capabilities", get(listings_upload::capabilities))
+        .route(
             "/api/v1/listings",
             get(listings::list).post(listings::create),
         )
         .route("/api/v1/listings/{id}/preview", get(listings::preview))
+        .route(
+            "/api/v1/listings/{id}/preview-pdf",
+            get(listings::preview_pdf),
+        )
         .route("/api/v1/listings/{id}/download", get(listings::download))
-        .layer(middleware::from_fn_with_state(state.clone(), rate_limit_middleware))
+        .route(
+            "/api/v1/listings/{id}/redownload",
+            get(buyer_redownload::redownload),
+        )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit_middleware,
+        ))
         .with_state(state.clone());
 
     Router::new()
@@ -59,6 +91,14 @@ pub fn router(state: SharedState) -> Router {
             "/api/v1/seller/delist-challenge",
             get(seller::delist_challenge),
         )
+        .route(
+            "/api/v1/buyer/feedback-challenge",
+            get(sale_feedback::feedback_challenge),
+        )
+        .route(
+            "/api/v1/buyer/redownload-challenge",
+            get(buyer_redownload::redownload_challenge),
+        )
         .route("/api/v1/seller/status", get(seller::status))
         .route("/api/v1/seller/provision-tx", post(seller::provision_tx))
         .merge(limited)
@@ -67,6 +107,10 @@ pub fn router(state: SharedState) -> Router {
             get(listings::get_one).delete(listings::delist),
         )
         .route("/api/v1/leaderboards", get(leaderboards::leaderboards))
+        .route(
+            "/api/v1/sales/{id}/feedback",
+            post(sale_feedback::submit_feedback),
+        )
         .route("/api/v1/events", get(events::sse))
         .route(
             "/.well-known/x402-resources.json",

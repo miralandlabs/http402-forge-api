@@ -1,5 +1,4 @@
 use axum::{
-    body::Body,
     extract::{Multipart, Path, Query, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
@@ -7,7 +6,6 @@ use axum::{
 };
 use bytes::Bytes;
 use chrono::Utc;
-use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -15,14 +13,16 @@ use crate::db::ListingFilterBinds;
 use crate::db::ListingRow;
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    parse_price_usdc, parse_tags_field, tags_to_json, text_preview_snippet, validate_category,
-    validate_license, validate_wallet, ListingPublic,
+    offers_pdf_sample_preview, parse_price_usdc, parse_tags_field, tags_to_json,
+    text_preview_snippet, validate_category, validate_license, validate_wallet, ListingPublic,
 };
+use crate::moderation::{moderation_labels_json, scan_listing_upload, ListingModerationInput};
 use crate::preview::{
-    self, generate_media_clip, generate_pdf_first_page_jpeg, is_pdf_content_type,
+    self, generate_media_clip, generate_pdf_first_page_jpeg, generate_pdf_page_sample,
+    is_pdf_content_type,
 };
 use crate::state::SharedState;
-use crate::storage::{object_key, ObjectStore};
+use crate::storage::{object_key, serve_object, DeliveryQuery, ObjectServeOptions, ObjectStore};
 use crate::x402::{PaymentContext, PaymentGate};
 
 #[derive(Debug, Deserialize)]
@@ -92,9 +92,14 @@ pub async fn list(
         .list_listings(&filters, &q.sort, q.limit, q.offset)
         .await?;
     let base = state.config.seller_public_base_url.clone();
+    let ids: Vec<Uuid> = rows.iter().map(|r| r.id).collect();
+    let quality_stats = state.db.listing_quality_stats(&ids).await?;
     let items = rows
         .into_iter()
-        .map(|r| ListingPublic::from_row(r, &base))
+        .map(|r| {
+            let quality = quality_stats.get(&r.id).cloned();
+            ListingPublic::from_row_with_quality(r, &base, quality)
+        })
         .collect();
     Ok(Json(ListResponse { items, total }))
 }
@@ -104,18 +109,22 @@ pub async fn get_one(
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<ListingPublic>> {
     let row = state.db.get_listing(id).await?;
-    Ok(Json(ListingPublic::from_row(
+    let mut quality_stats = state.db.listing_quality_stats(&[id]).await?;
+    Ok(Json(ListingPublic::from_row_with_quality(
         row,
         &state.config.seller_public_base_url,
+        quality_stats.remove(&id),
     )))
 }
 
 pub async fn preview(
     State(state): State<SharedState>,
     Path(id): Path<Uuid>,
+    Query(delivery_q): Query<DeliveryQuery>,
 ) -> AppResult<Response> {
     let row = state.db.get_listing(id).await?;
     let (stream_key, content_type) = resolve_preview_key_and_type(&state, &row).await?;
+    let format = delivery_q.format(&state.config)?;
 
     if content_type.starts_with("text/") || content_type == "application/json" {
         let (bytes, _) = state.storage.get(&stream_key).await?;
@@ -129,15 +138,143 @@ pub async fn preview(
             .into_response());
     }
 
-    let (stream, content_type) = state.storage.stream(&stream_key).await?;
-    let body = Body::from_stream(stream.map(|result| result.map_err(axum::Error::new)));
-    let response = Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, content_type)
-        .header(header::ACCEPT_RANGES, "bytes")
-        .body(body)
-        .map_err(|e| AppError::Internal(e.into()))?;
-    Ok(response)
+    serve_object(
+        &state,
+        ObjectServeOptions {
+            key: &stream_key,
+            content_type: &content_type,
+            content_disposition: None,
+            extra_headers: HeaderMap::new(),
+            format,
+            sale_id: None,
+        },
+    )
+    .await
+}
+
+pub async fn preview_pdf(
+    State(state): State<SharedState>,
+    Path(id): Path<Uuid>,
+    Query(delivery_q): Query<DeliveryQuery>,
+) -> AppResult<Response> {
+    let row = state.db.get_listing(id).await?;
+    if !offers_pdf_sample_preview(&row) {
+        return Err(AppError::NotFound);
+    }
+    let sample_key = resolve_pdf_detail_sample_key(&state, &row).await?;
+    let format = delivery_q.format(&state.config)?;
+    serve_object(
+        &state,
+        ObjectServeOptions {
+            key: &sample_key,
+            content_type: "application/pdf",
+            content_disposition: None,
+            extra_headers: HeaderMap::new(),
+            format,
+            sale_id: None,
+        },
+    )
+    .await
+}
+
+fn pdf_sample_preview_key(id: Uuid) -> String {
+    object_key("previews", id, "preview-sample.pdf")
+}
+
+async fn store_full_pdf_preview_sample(
+    state: &SharedState,
+    id: Uuid,
+    pdf: &Bytes,
+) -> AppResult<()> {
+    if pdf.len() as u64 > state.config.max_preview_bytes {
+        tracing::warn!(
+            listing_id = %id,
+            bytes = pdf.len(),
+            max = state.config.max_preview_bytes,
+            "uploaded PDF preview exceeds max preview bytes; skipping detail sample"
+        );
+        return Ok(());
+    }
+    state
+        .storage
+        .put(&pdf_sample_preview_key(id), "application/pdf", pdf.clone())
+        .await?;
+    Ok(())
+}
+
+async fn store_pdf_page_sample(state: &SharedState, id: Uuid, source_pdf: &Bytes) -> AppResult<()> {
+    match generate_pdf_page_sample(source_pdf, &state.config).await {
+        Ok(sample) => {
+            if sample.len() as u64 > state.config.max_preview_bytes {
+                tracing::warn!(
+                    listing_id = %id,
+                    bytes = sample.len(),
+                    max = state.config.max_preview_bytes,
+                    "PDF page sample exceeds max preview bytes; skipping"
+                );
+                return Ok(());
+            }
+            state
+                .storage
+                .put(&pdf_sample_preview_key(id), "application/pdf", sample)
+                .await?;
+        }
+        Err(e) => {
+            tracing::warn!(listing_id = %id, error = %e, "PDF page sample generation failed");
+        }
+    }
+    Ok(())
+}
+
+/// Seller uploaded a standalone PDF preview file (not rasterized to JPEG for the grid).
+fn seller_uploaded_pdf_preview_key(row: &ListingRow) -> bool {
+    is_pdf_content_type(&row.preview_content_type)
+        && row.preview_key != row.asset_key
+        && row.preview_key.ends_with("/preview.pdf")
+}
+
+async fn resolve_pdf_detail_sample_key(state: &SharedState, row: &ListingRow) -> AppResult<String> {
+    if !offers_pdf_sample_preview(row) {
+        return Err(AppError::NotFound);
+    }
+    let sample_key = pdf_sample_preview_key(row.id);
+    if state.storage.head(&sample_key).await.is_ok() {
+        return Ok(sample_key);
+    }
+    if seller_uploaded_pdf_preview_key(row) {
+        return Ok(row.preview_key.clone());
+    }
+    ensure_pdf_page_sample(state, row).await
+}
+
+async fn pdf_sample_source_bytes(state: &SharedState, row: &ListingRow) -> AppResult<Bytes> {
+    if !offers_pdf_sample_preview(row) {
+        return Err(AppError::NotFound);
+    }
+    if is_pdf_content_type(&row.preview_content_type) && row.preview_key != row.asset_key {
+        let (data, _) = state.storage.get(&row.preview_key).await?;
+        return Ok(data);
+    }
+    if is_pdf_content_type(&row.content_type) {
+        let (data, _) = state.storage.get(&row.asset_key).await?;
+        return Ok(data);
+    }
+    Err(AppError::NotFound)
+}
+
+async fn ensure_pdf_page_sample(state: &SharedState, row: &ListingRow) -> AppResult<String> {
+    let key = pdf_sample_preview_key(row.id);
+    if state.storage.head(&key).await.is_ok() {
+        return Ok(key);
+    }
+    let source = pdf_sample_source_bytes(state, row).await?;
+    store_pdf_page_sample(state, row.id, &source).await?;
+    state
+        .storage
+        .head(&key)
+        .await
+        .map_err(|_| AppError::NotFound)?;
+    Ok(key)
 }
 
 async fn resolve_preview_key_and_type(
@@ -171,32 +308,48 @@ async fn resolve_preview_key_and_type(
 pub async fn download(
     State(state): State<SharedState>,
     Path(id): Path<Uuid>,
+    Query(delivery_q): Query<DeliveryQuery>,
     headers: HeaderMap,
 ) -> AppResult<Response> {
     let row = state.db.get_listing_any(id).await?;
     let path = format!("/api/v1/listings/{id}/download");
     let payment = PaymentGate::check_download_active_or_paid(&state, &headers, &row, &path).await?;
 
-    if !payment.already_paid {
-        record_sale(&state, &row, &payment).await?;
-    }
+    let mode = if payment.already_paid {
+        "retry_same_payment_proof"
+    } else {
+        "new_settlement"
+    };
+    tracing::info!(
+        listing_id = %id,
+        buyer = %payment.payer_wallet,
+        bytes = row.byte_size,
+        mode,
+        "paid download"
+    );
 
-    let (stream, content_type) = state.storage.stream(&row.asset_key).await?;
-    let body = Body::from_stream(stream.map(|result| result.map_err(axum::Error::new)));
-    let mut response = Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, content_type)
-        .header(
-            header::CONTENT_DISPOSITION,
-            format!("attachment; filename=\"{}\"", sanitize_filename(&row.title)),
-        )
-        .body(body)
-        .map_err(|e| AppError::Internal(e.into()))?;
+    let sale_row = if payment.already_paid {
+        state
+            .db
+            .find_sale_by_payment(row.id, &payment.payer_wallet, &payment.payment_signature)
+            .await?
+    } else {
+        Some(record_sale(&state, &row, &payment).await?)
+    };
 
-    if !payment.settle_proof.is_null() {
-        response = PaymentGate::attach_payment_response(response, &payment.settle_proof);
-    }
-    Ok(response)
+    let settle = if payment.settle_proof.is_null() {
+        None
+    } else {
+        Some(&payment.settle_proof)
+    };
+    build_asset_download_response(
+        &state,
+        &row,
+        sale_row.as_ref(),
+        settle,
+        delivery_q.format(&state.config)?,
+    )
+    .await
 }
 
 #[derive(Debug, Deserialize)]
@@ -242,7 +395,7 @@ async fn record_sale(
     state: &SharedState,
     listing: &ListingRow,
     payment: &PaymentContext,
-) -> AppResult<()> {
+) -> AppResult<crate::db::SaleRow> {
     let tx = payment
         .settle_proof
         .get("transaction")
@@ -259,13 +412,16 @@ async fn record_sale(
             &tx,
         )
         .await?;
-    let _ = state.sale_events.send(sale);
-    Ok(())
+    let _ = state.sale_events.send(sale.clone());
+    Ok(sale)
 }
 
 const VAULT_REQUIRED_MSG: &str = "Activate your pr402 SplitVault before publishing.";
 
-async fn require_seller_vault(state: &SharedState, seller_wallet: &str) -> AppResult<()> {
+pub(crate) async fn require_seller_vault(
+    state: &SharedState,
+    seller_wallet: &str,
+) -> AppResult<()> {
     let ok = state
         .facilitator
         .seller_has_vault(seller_wallet)
@@ -289,6 +445,45 @@ fn sanitize_filename(title: &str) -> String {
         })
         .take(80)
         .collect()
+}
+
+pub(crate) async fn build_asset_download_response(
+    state: &SharedState,
+    row: &ListingRow,
+    sale: Option<&crate::db::SaleRow>,
+    settle_proof: Option<&serde_json::Value>,
+    format: crate::storage::DeliveryFormat,
+) -> AppResult<Response> {
+    let content_type = state.storage.head(&row.asset_key).await?;
+    let sale_id_str = sale.map(|s| s.id.to_string());
+    let mut extra_headers = HeaderMap::new();
+    if let Some(ref sale_id) = sale_id_str {
+        extra_headers.insert(
+            "X-Forge-Sale-Id",
+            header::HeaderValue::from_str(sale_id).map_err(|e| AppError::Internal(e.into()))?,
+        );
+    }
+
+    let mut response = serve_object(
+        state,
+        ObjectServeOptions {
+            key: &row.asset_key,
+            content_type: &content_type,
+            content_disposition: Some(format!(
+                "attachment; filename=\"{}\"",
+                sanitize_filename(&row.title)
+            )),
+            extra_headers,
+            format,
+            sale_id: sale_id_str.as_deref(),
+        },
+    )
+    .await?;
+
+    if let Some(settle) = settle_proof {
+        response = PaymentGate::attach_payment_response(response, settle);
+    }
+    Ok(response)
 }
 
 pub async fn create(
@@ -413,21 +608,8 @@ pub async fn create(
     }
 
     validate_wallet(&seller_wallet).map_err(|m| AppError::validation("seller_wallet", m))?;
-    validate_category(&category).map_err(|m| AppError::validation("category", m))?;
-    if title.trim().is_empty() || title.len() > 120 {
-        return Err(AppError::validation("title", "required, max 120 chars"));
-    }
-    if description.len() > 2000 {
-        return Err(AppError::validation("description", "max 2000 chars"));
-    }
-    let price_micro =
-        parse_price_usdc(&price_usdc).map_err(|m| AppError::validation("price_usdc", m))?;
-    validate_license(license.as_deref()).map_err(|m| AppError::validation("license", m))?;
-    let tags = parse_tags_field(&tags_raw).map_err(|m| AppError::validation("tags", m))?;
     let (asset_ct, asset_data) =
         asset_bytes.ok_or_else(|| AppError::validation("asset", "file required"))?;
-
-    let content_hash = content_hash.or_else(|| Some(sha256_hex(&asset_data)));
 
     if !state.config.skip_seller_auth {
         state.seller_auth.verify_and_consume(
@@ -448,38 +630,28 @@ pub async fn create(
         .put(&asset_key, &asset_ct, asset_data.clone())
         .await?;
 
-    let (preview_key, preview_content_type) =
-        store_listing_preview(&state, id, &asset_ct, &asset_data, preview_bytes).await?;
-
-    let delivery_scheme = if asset_data.len() as u64 >= state.config.escrow_size_threshold {
-        "escrow"
-    } else {
-        "exact"
-    };
-
-    let row = ListingRow {
+    let row = publish_listing(
+        &state,
+        PublishListingInput {
+            seller_wallet,
+            display_name,
+            title,
+            description,
+            category,
+            price_usdc,
+            agent_friendly,
+            tags_raw,
+            license,
+            content_hash,
+            asset_ct,
+            asset_data,
+            preview_bytes,
+        },
         id,
-        seller_wallet: seller_wallet.clone(),
-        display_name: display_name.filter(|s| !s.is_empty()),
-        title: title.trim().to_string(),
-        description,
-        category,
-        price_micro_usdc: price_micro,
-        preview_key,
-        preview_content_type,
         asset_key,
-        content_type: asset_ct,
-        byte_size: asset_data.len() as i64,
-        agent_friendly,
-        delivery_scheme: delivery_scheme.into(),
-        status: "active".into(),
-        tags: tags_to_json(&tags),
-        license,
-        content_hash,
-        created_at: Utc::now(),
-    };
-
-    state.db.insert_listing(&row).await?;
+        true,
+    )
+    .await?;
 
     Ok((
         StatusCode::CREATED,
@@ -488,6 +660,150 @@ pub async fn create(
             &state.config.seller_public_base_url,
         )),
     ))
+}
+
+pub(crate) struct PublishListingInput {
+    pub seller_wallet: String,
+    pub display_name: Option<String>,
+    pub title: String,
+    pub description: String,
+    pub category: String,
+    pub price_usdc: String,
+    pub agent_friendly: bool,
+    pub tags_raw: String,
+    pub license: Option<String>,
+    pub content_hash: Option<String>,
+    pub asset_ct: String,
+    pub asset_data: Bytes,
+    pub preview_bytes: Option<(String, Bytes)>,
+}
+
+pub(crate) async fn publish_listing(
+    state: &SharedState,
+    input: PublishListingInput,
+    id: Uuid,
+    asset_key: String,
+    asset_already_stored: bool,
+) -> AppResult<ListingRow> {
+    validate_wallet(&input.seller_wallet).map_err(|m| AppError::validation("seller_wallet", m))?;
+    validate_category(&input.category).map_err(|m| AppError::validation("category", m))?;
+    if input.title.trim().is_empty() || input.title.len() > 120 {
+        return Err(AppError::validation("title", "required, max 120 chars"));
+    }
+    if input.description.len() > 2000 {
+        return Err(AppError::validation("description", "max 2000 chars"));
+    }
+    let price_micro =
+        parse_price_usdc(&input.price_usdc).map_err(|m| AppError::validation("price_usdc", m))?;
+    validate_license(input.license.as_deref()).map_err(|m| AppError::validation("license", m))?;
+    let tags = parse_tags_field(&input.tags_raw).map_err(|m| AppError::validation("tags", m))?;
+
+    let computed_hash = sha256_hex(&input.asset_data);
+    if let Some(ref provided) = input.content_hash {
+        if provided.trim().to_ascii_lowercase() != computed_hash {
+            return Err(AppError::validation(
+                "content_hash",
+                "must match SHA-256 of uploaded asset",
+            ));
+        }
+    }
+    let content_hash = Some(computed_hash.clone());
+
+    if state.db.is_content_hash_blocked(&computed_hash).await? {
+        return Err(AppError::Forbidden(
+            "this content hash is blocked from upload".into(),
+        ));
+    }
+
+    require_seller_vault(state, &input.seller_wallet).await?;
+
+    let preview_for_scan = input.preview_bytes.as_ref().map(|(_, data)| data);
+    let preview_ct_for_scan = input.preview_bytes.as_ref().map(|(ct, _)| ct.as_str());
+    let moderation = scan_listing_upload(
+        &state.config.moderation,
+        ListingModerationInput {
+            title: input.title.trim(),
+            description: &input.description,
+            tags: &tags,
+            asset_content_type: &input.asset_ct,
+            asset_data: &input.asset_data,
+            preview_data: preview_for_scan,
+            preview_content_type: preview_ct_for_scan,
+        },
+    )
+    .await;
+    let moderation = match moderation {
+        Ok(result) => result,
+        Err(e) => {
+            if state.config.moderation.fail_closed {
+                return Err(e);
+            }
+            tracing::warn!(error = %e, "content moderation unavailable; allowing upload");
+            crate::moderation::ModerationScanResult {
+                flagged: false,
+                labels: Vec::new(),
+            }
+        }
+    };
+    if moderation.flagged {
+        let detail = if moderation.labels.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", moderation.labels.join(", "))
+        };
+        return Err(AppError::BadRequest(format!(
+            "listing blocked by content moderation{detail}"
+        )));
+    }
+
+    if !asset_already_stored {
+        state
+            .storage
+            .put(&asset_key, &input.asset_ct, input.asset_data.clone())
+            .await?;
+    }
+
+    let (preview_key, preview_content_type) = store_listing_preview(
+        state,
+        id,
+        &input.asset_ct,
+        &input.asset_data,
+        input.preview_bytes,
+    )
+    .await?;
+
+    let delivery_scheme = if input.asset_data.len() as u64 >= state.config.escrow_size_threshold {
+        "escrow"
+    } else {
+        "exact"
+    };
+
+    let row = ListingRow {
+        id,
+        seller_wallet: input.seller_wallet.clone(),
+        display_name: input.display_name.filter(|s| !s.is_empty()),
+        title: input.title.trim().to_string(),
+        description: input.description,
+        category: input.category,
+        price_micro_usdc: price_micro,
+        preview_key,
+        preview_content_type,
+        asset_key,
+        content_type: input.asset_ct,
+        byte_size: input.asset_data.len() as i64,
+        agent_friendly: input.agent_friendly,
+        delivery_scheme: delivery_scheme.into(),
+        status: "active".into(),
+        tags: tags_to_json(&tags),
+        license: input.license,
+        content_hash,
+        moderation_status: "approved".into(),
+        moderation_labels: moderation_labels_json(&moderation.labels),
+        created_at: Utc::now(),
+    };
+
+    state.db.insert_listing(&row).await?;
+    Ok(row)
 }
 
 fn generate_image_preview(data: &Bytes, content_type: &str) -> AppResult<Bytes> {
@@ -555,6 +871,7 @@ async fn store_listing_preview(
                     .storage
                     .put(&key, "image/jpeg", preview.clone())
                     .await?;
+                store_pdf_page_sample(state, id, asset_data).await?;
                 Ok((key, "image/jpeg".to_string()))
             }
             Err(e) => {
@@ -593,6 +910,7 @@ async fn store_uploaded_preview(
         match generate_pdf_first_page_jpeg(preview_data, &state.config).await {
             Ok(jpeg) => {
                 state.storage.put(&key, "image/jpeg", jpeg).await?;
+                store_full_pdf_preview_sample(state, id, preview_data).await?;
                 return Ok((key, "image/jpeg".to_string()));
             }
             Err(e) => {
@@ -601,7 +919,10 @@ async fn store_uploaded_preview(
                     "Uploaded PDF preview could not be rasterized; storing PDF for inline embed"
                 );
                 let key = object_key("previews", id, "preview.pdf");
-                state.storage.put(&key, preview_ct, preview_data.clone()).await?;
+                state
+                    .storage
+                    .put(&key, preview_ct, preview_data.clone())
+                    .await?;
                 return Ok((key, preview_ct.to_string()));
             }
         }

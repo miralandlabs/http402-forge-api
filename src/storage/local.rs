@@ -74,6 +74,17 @@ impl ObjectStore for LocalStorage {
         Ok(self.content_type_for(key).await)
     }
 
+    async fn object_size(&self, key: &str) -> AppResult<u64> {
+        let path = self.path_for(key);
+        if !path.exists() {
+            return Err(AppError::NotFound);
+        }
+        let meta = fs::metadata(&path)
+            .await
+            .map_err(|e| AppError::Storage(e.to_string()))?;
+        Ok(meta.len())
+    }
+
     async fn stream(&self, key: &str) -> AppResult<(ByteStream, String)> {
         let path = self.path_for(key);
         if !path.exists() {
@@ -85,5 +96,22 @@ impl ObjectStore for LocalStorage {
             .map_err(|e| AppError::Storage(e.to_string()))?;
         let stream = ReaderStream::new(file);
         Ok((Box::pin(stream), content_type))
+    }
+
+    async fn presign_get(&self, _key: &str, _ttl_secs: u32) -> AppResult<String> {
+        Err(AppError::Storage(
+            "presigned GET requires STORAGE_BACKEND=r2".into(),
+        ))
+    }
+
+    async fn presign_put(
+        &self,
+        _key: &str,
+        _content_type: &str,
+        _ttl_secs: u32,
+    ) -> AppResult<super::PresignedPut> {
+        Err(AppError::Storage(
+            "presigned PUT requires STORAGE_BACKEND=r2".into(),
+        ))
     }
 }

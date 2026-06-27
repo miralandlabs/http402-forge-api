@@ -149,6 +149,10 @@ sync_systemd_unit() {
     systemctl daemon-reload
 }
 
+ensure_log_host_dir() {
+    install -d -m 0755 "/var/log/forge/${CLUSTER}"
+}
+
 prepare_service_start() {
     echo "[deploy] stopping ${SERVICE} and removing ${CONTAINER_NAME}…"
     systemctl stop "$SERVICE" 2>/dev/null || true
@@ -252,6 +256,7 @@ capture_container_startup_error() {
         --env-file "$ENV_FILE" \
         -e LOCAL_STORAGE_PATH=/app/data/objects \
         -v "/var/lib/forge/${CLUSTER}/data:/app/data" \
+        -v "/var/log/forge/${CLUSTER}:/app/logs" \
         -v "/etc/forge/ssl:/etc/forge/ssl:ro" \
         --memory 1536m --cpus 1.5 \
         "${IMAGE}:current" 2>&1 | tail -40 >&2 || true
@@ -294,6 +299,7 @@ if [[ "$ROLLBACK" -eq 1 ]]; then
         exit 65
     fi
     preflight_database
+    ensure_log_host_dir
     restore_previous_as_current
     sync_systemd_unit
     prepare_service_start
@@ -336,6 +342,7 @@ else
 fi
 
 promote_sha_to_current "${IMAGE_SHA}"
+ensure_log_host_dir
 sync_systemd_unit
 prepare_service_start
 systemctl restart "$SERVICE"

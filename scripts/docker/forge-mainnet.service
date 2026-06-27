@@ -25,6 +25,7 @@ ExecStart=/usr/bin/docker run \
     --env-file /etc/forge/mainnet.env \
     -e LOCAL_STORAGE_PATH=/app/data/objects \
     -v /var/lib/forge/mainnet/data:/app/data \
+    -v /var/log/forge/mainnet:/app/logs \
     -v /etc/forge/ssl:/etc/forge/ssl:ro \
     --memory 1536m \
     --cpus 1.5 \

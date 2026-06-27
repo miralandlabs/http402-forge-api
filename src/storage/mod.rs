@@ -1,3 +1,4 @@
+mod delivery;
 mod local;
 mod r2;
 
@@ -10,17 +11,37 @@ use futures::Stream;
 use crate::config::{AppConfig, StorageBackend};
 use crate::error::AppResult;
 
+pub use delivery::{
+    serve_object, supports_presigned_upload, DeliveryFormat, DeliveryQuery, ObjectServeOptions,
+};
 pub use local::LocalStorage;
 pub use r2::R2Storage;
 
 pub type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>>;
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PresignedPut {
+    pub object_key: String,
+    pub method: &'static str,
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+}
 
 #[async_trait]
 pub trait ObjectStore: Send + Sync {
     async fn put(&self, key: &str, content_type: &str, data: Bytes) -> AppResult<()>;
     async fn get(&self, key: &str) -> AppResult<(Bytes, String)>;
     async fn head(&self, key: &str) -> AppResult<String>;
+    async fn object_size(&self, key: &str) -> AppResult<u64>;
     async fn stream(&self, key: &str) -> AppResult<(ByteStream, String)>;
+    async fn presign_get(&self, key: &str, ttl_secs: u32) -> AppResult<String>;
+    async fn presign_put(
+        &self,
+        key: &str,
+        content_type: &str,
+        ttl_secs: u32,
+    ) -> AppResult<PresignedPut>;
 }
 
 pub enum Storage {
@@ -51,10 +72,36 @@ impl ObjectStore for Storage {
         }
     }
 
+    async fn object_size(&self, key: &str) -> AppResult<u64> {
+        match self {
+            Self::Local(s) => s.object_size(key).await,
+            Self::R2(s) => s.object_size(key).await,
+        }
+    }
+
     async fn stream(&self, key: &str) -> AppResult<(ByteStream, String)> {
         match self {
             Self::Local(s) => s.stream(key).await,
             Self::R2(s) => s.stream(key).await,
+        }
+    }
+
+    async fn presign_get(&self, key: &str, ttl_secs: u32) -> AppResult<String> {
+        match self {
+            Self::Local(s) => s.presign_get(key, ttl_secs).await,
+            Self::R2(s) => s.presign_get(key, ttl_secs).await,
+        }
+    }
+
+    async fn presign_put(
+        &self,
+        key: &str,
+        content_type: &str,
+        ttl_secs: u32,
+    ) -> AppResult<PresignedPut> {
+        match self {
+            Self::Local(s) => s.presign_put(key, content_type, ttl_secs).await,
+            Self::R2(s) => s.presign_put(key, content_type, ttl_secs).await,
         }
     }
 }

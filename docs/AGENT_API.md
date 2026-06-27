@@ -14,8 +14,9 @@ Forge is a **catalog + 402 checkout** service. OpenAPI describes API *shape*; th
 1. Search catalog   GET /api/v1/listings?q=…&seller_wallet=…&category=…&agent_friendly=true
 2. Inspect listing  GET /api/v1/listings/{id}
 3. Sample (free)    GET /api/v1/listings/{id}/preview
-4. Purchase         GET /api/v1/listings/{id}/download  → 402 → sign → retry
-5. Delist (owner)   GET /api/v1/seller/delist-challenge → sign → DELETE /api/v1/listings/{id}
+4. Purchase         GET /api/v1/listings/{id}/download  → 402 → sign → retry (note X-Forge-Sale-Id)
+5. Verify bytes     SHA-256(download) vs listing contentHash; optional POST sale feedback
+6. Delist (owner)   GET /api/v1/seller/delist-challenge → sign → DELETE /api/v1/listings/{id}
 ```
 
 **Stable product ID:** listing UUID (`id`). Store that — not OpenAPI paths or slug URLs.
@@ -46,7 +47,7 @@ GET /api/v1/listings?q=cyberpunk&seller_wallet=AbC…&category=art&agent_friendl
 | `seller_wallet` | Optional. Exact match on seller pubkey (base58). Combine with `q` to search within one seller's catalog. |
 | `category` | `art`, `text`, `audio`, `video`, `prompt_pack` |
 | `agent_friendly` | `true` / `false` |
-| `sort` | `trending` (default), `newest`, `price_asc`, `price_desc` |
+| `sort` | `trending` (default), `newest`, `price_asc`, `price_desc`, `quality` |
 | `limit` | 1–100 (default 20) |
 | `offset` | Pagination offset |
 
@@ -72,6 +73,8 @@ Response:
       "tags": ["prompt", "agent"],
       "license": "personal",
       "contentHash": "a1b2c3…",
+      "qualityScore": 92,
+      "verifiedFeedbackCount": 3,
       "previewUrl": "https://api.http402.trade/api/v1/listings/550e8400-e29b-41d4-a716-446655440000/preview",
       "createdAt": "2026-06-24T12:00:00Z"
     }
@@ -105,7 +108,7 @@ Content-Type: multipart/form-data
 | `agent_friendly` | no | default false |
 | `tags` | no | Comma-separated or JSON array (agent-oriented listings) |
 | `license` | no | `personal` or `commercial` |
-| `content_hash` | no | SHA-256 hex of asset; computed automatically if omitted |
+| `content_hash` | no | Optional; if sent, **must equal** server SHA-256 of `asset`. Server always computes and stores hash from asset bytes. |
 | `asset` | yes | paid download file |
 | `preview` | no | optional teaser file (any MIME); PDF uploads are rasterized to JPEG for thumbnails; auto-generated if omitted (see below) |
 
@@ -193,7 +196,7 @@ GET /api/v1/listings/{id}/download
 2. Build tx: `POST {facilitator}/build-exact-payment-tx` with `accepted` line from `accepts[]`.
 3. Sign transaction locally.
 4. Retry with header `PAYMENT-SIGNATURE: {base64 proof}`.
-5. **200** → response body is the asset file stream (`Content-Type` from listing).
+5. **200** → response body is the asset file stream (`Content-Type` from listing). Response header **`X-Forge-Sale-Id`** is the purchase row UUID (use for sale feedback).
 
 **Removed listings:** no **402** — new buyers get **404**. Agents with a stored payment proof retry step 4 with the same `PAYMENT-SIGNATURE`; idempotency returns **200** without charging again.
 
@@ -235,6 +238,54 @@ Accept: text/event-stream
 ```
 
 Events: `sale` with JSON payload `{listing_id, seller_wallet, buyer_wallet, amount_micro_usdc}`.
+
+## Trust (purchase-linked feedback)
+
+No open listing star ratings. Trust rolls up from **verified purchase feedback** on `sales` rows.
+
+**Verify downloaded bytes:**
+
+```text
+1. GET /api/v1/listings/{id}  →  contentHash (lowercase hex, no 0x prefix)
+2. Pay + GET /download          →  bytes + X-Forge-Sale-Id
+3. SHA-256(bytes) as hex        →  must equal contentHash
+4. On mismatch                  →  POST sale feedback outcome=hash_mismatch
+```
+
+List/detail JSON may include `qualityScore` (0–100 average from outcomes) and `verifiedFeedbackCount` when feedback exists. Sort catalog with `sort=quality` (requires ≥2 verified signals per listing).
+
+**Submit feedback (buyer on that sale only):**
+
+1. `GET /api/v1/buyer/feedback-challenge?buyer_wallet={pubkey}&sale_id={uuid}`
+2. Sign `message` (prefix `http402-forge:sale-feedback:v1`).
+3. `POST /api/v1/sales/{sale_id}/feedback`
+
+```json
+{
+  "buyer_wallet": "{pubkey}",
+  "buyer_challenge": "{exact message}",
+  "buyer_signature": "{base64}",
+  "outcome": "as_described",
+  "score": null,
+  "note": null
+}
+```
+
+| `outcome` | Meaning |
+|-----------|---------|
+| `as_described` | Asset matches listing |
+| `hash_mismatch` | SHA-256(bytes) ≠ listing `contentHash` |
+| `corrupt` | Unusable file |
+| `misleading` | Not as advertised |
+| `other` | Neutral / unspecified |
+
+One feedback row per `sale_id` (**409** on duplicate). Dev bypass: `SKIP_BUYER_AUTH=1`.
+
+TypeScript helpers: `verifyListingContent`, `forgeSaleFeedback`, `forgeBuy({ autoFeedback: true, buyerKeypair, buyerWallet })` in `x402-buyer-starter`.
+
+## Content moderation (upload)
+
+Before storage, uploads may be scanned when `MODERATION_PROVIDER=openai` (requires `OPENAI_API_KEY`). Default `none` skips provider scan but still checks `blocked_content_hashes`. Flagged uploads return **400** with `listing blocked by content moderation`. Set `MODERATION_FAIL_CLOSED=1` to reject uploads when the provider is unreachable.
 
 ## Discovery
 

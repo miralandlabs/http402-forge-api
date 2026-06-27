@@ -52,6 +52,57 @@ pub enum StorageBackend {
     R2,
 }
 
+/// How object bytes reach clients: proxy through API or redirect to presigned R2 URL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectDelivery {
+    Proxy,
+    Redirect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModerationProvider {
+    None,
+    OpenAi,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModerationConfig {
+    pub provider: ModerationProvider,
+    pub openai_api_key: Option<String>,
+    pub fail_closed: bool,
+}
+
+impl ModerationConfig {
+    pub fn from_env() -> Result<Self, String> {
+        let provider = match std::env::var("MODERATION_PROVIDER")
+            .unwrap_or_else(|_| "none".into())
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "none" => ModerationProvider::None,
+            "openai" => ModerationProvider::OpenAi,
+            v => {
+                return Err(format!(
+                    "MODERATION_PROVIDER must be 'none' or 'openai'; got '{v}'"
+                ))
+            }
+        };
+        let fail_closed = match std::env::var("MODERATION_FAIL_CLOSED") {
+            Ok(v) if v == "1" || v.eq_ignore_ascii_case("true") => true,
+            Ok(v) if v == "0" || v.eq_ignore_ascii_case("false") => false,
+            Ok(v) => return Err(format!("MODERATION_FAIL_CLOSED must be 0 or 1; got '{v}'")),
+            Err(_) => false,
+        };
+        Ok(Self {
+            provider,
+            openai_api_key: std::env::var("OPENAI_API_KEY")
+                .ok()
+                .filter(|s| !s.trim().is_empty()),
+            fail_closed,
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub cluster: SolanaCluster,
@@ -81,7 +132,11 @@ pub struct AppConfig {
     pub oracle_profile_id: String,
     pub skip_seller_vault_check: bool,
     pub skip_seller_auth: bool,
+    pub skip_buyer_auth: bool,
+    pub moderation: ModerationConfig,
     pub cors_allowed_origins: Vec<String>,
+    pub object_delivery: ObjectDelivery,
+    pub presign_ttl_secs: u32,
     pub version: String,
 }
 
@@ -166,9 +221,40 @@ impl AppConfig {
                 Ok(v) => return Err(format!("SKIP_SELLER_AUTH must be 0 or 1; got '{v}'")),
                 Err(_) => false,
             },
+            skip_buyer_auth: match std::env::var("SKIP_BUYER_AUTH") {
+                Ok(v) if v == "1" || v.eq_ignore_ascii_case("true") => true,
+                Ok(v) if v == "0" || v.eq_ignore_ascii_case("false") => false,
+                Ok(v) => return Err(format!("SKIP_BUYER_AUTH must be 0 or 1; got '{v}'")),
+                Err(_) => false,
+            },
+            moderation: ModerationConfig::from_env()?,
             cors_allowed_origins: parse_cors_origins(cluster),
+            object_delivery: parse_object_delivery(storage_backend),
+            presign_ttl_secs: env_u32("PRESIGN_TTL_SECS", 300),
             version: std::env::var("FORGE_VERSION").unwrap_or_else(|_| "0.1.0".into()),
         })
+    }
+}
+
+fn parse_object_delivery(storage_backend: StorageBackend) -> ObjectDelivery {
+    match std::env::var("OBJECT_DELIVERY")
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "" => match storage_backend {
+            StorageBackend::R2 => ObjectDelivery::Redirect,
+            StorageBackend::Local => ObjectDelivery::Proxy,
+        },
+        "redirect" => ObjectDelivery::Redirect,
+        "proxy" => ObjectDelivery::Proxy,
+        v => {
+            tracing::warn!("invalid OBJECT_DELIVERY={v:?}; using default for storage backend");
+            match storage_backend {
+                StorageBackend::R2 => ObjectDelivery::Redirect,
+                StorageBackend::Local => ObjectDelivery::Proxy,
+            }
+        }
     }
 }
 

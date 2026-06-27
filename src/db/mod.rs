@@ -4,11 +4,13 @@ mod payment;
 mod postgres;
 mod sales;
 mod sqlite;
+mod trust;
 
 pub use listing::ListingRow;
 pub use listing_filters::ListingFilterBinds;
 pub use payment::PaymentRow;
 pub use sales::{LeaderboardListingRow, LeaderboardWalletRow, SaleRow};
+pub use trust::{ListingQualityStats, SaleFeedbackRow, validate_feedback_outcome};
 
 use deadpool_postgres::Pool as PgPool;
 use deadpool_sqlite::Pool as SqlitePool;
@@ -240,6 +242,86 @@ impl Database {
             DbBackend::Sqlite(pool) => {
                 sqlite::set_preview_content_type(pool, id, preview_content_type).await
             }
+        }
+    }
+
+    pub async fn is_content_hash_blocked(&self, content_hash: &str) -> AppResult<bool> {
+        match &self.backend {
+            DbBackend::Postgres(pool) => postgres::is_content_hash_blocked(pool, content_hash).await,
+            DbBackend::Sqlite(pool) => sqlite::is_content_hash_blocked(pool, content_hash).await,
+        }
+    }
+
+    pub async fn get_sale(&self, sale_id: uuid::Uuid) -> AppResult<SaleRow> {
+        match &self.backend {
+            DbBackend::Postgres(pool) => postgres::get_sale(pool, sale_id).await,
+            DbBackend::Sqlite(pool) => sqlite::get_sale(pool, sale_id).await,
+        }
+    }
+
+    pub async fn find_sale_by_payment(
+        &self,
+        listing_id: uuid::Uuid,
+        buyer_wallet: &str,
+        tx_signature: &str,
+    ) -> AppResult<Option<SaleRow>> {
+        match &self.backend {
+            DbBackend::Postgres(pool) => {
+                postgres::find_sale_by_payment(pool, listing_id, buyer_wallet, tx_signature).await
+            }
+            DbBackend::Sqlite(pool) => {
+                sqlite::find_sale_by_payment(pool, listing_id, buyer_wallet, tx_signature).await
+            }
+        }
+    }
+
+    pub async fn find_buyer_sale_for_listing(
+        &self,
+        listing_id: uuid::Uuid,
+        buyer_wallet: &str,
+    ) -> AppResult<Option<SaleRow>> {
+        match &self.backend {
+            DbBackend::Postgres(pool) => {
+                postgres::find_buyer_sale_for_listing(pool, listing_id, buyer_wallet).await
+            }
+            DbBackend::Sqlite(pool) => {
+                sqlite::find_buyer_sale_for_listing(pool, listing_id, buyer_wallet).await
+            }
+        }
+    }
+
+    pub async fn insert_sale_feedback(
+        &self,
+        sale_id: uuid::Uuid,
+        listing_id: uuid::Uuid,
+        buyer_wallet: &str,
+        outcome: &str,
+        score: Option<i16>,
+        note: Option<&str>,
+    ) -> AppResult<SaleFeedbackRow> {
+        match &self.backend {
+            DbBackend::Postgres(pool) => {
+                postgres::insert_sale_feedback(
+                    pool, sale_id, listing_id, buyer_wallet, outcome, score, note,
+                )
+                .await
+            }
+            DbBackend::Sqlite(pool) => {
+                sqlite::insert_sale_feedback(
+                    pool, sale_id, listing_id, buyer_wallet, outcome, score, note,
+                )
+                .await
+            }
+        }
+    }
+
+    pub async fn listing_quality_stats(
+        &self,
+        listing_ids: &[uuid::Uuid],
+    ) -> AppResult<std::collections::HashMap<uuid::Uuid, ListingQualityStats>> {
+        match &self.backend {
+            DbBackend::Postgres(pool) => postgres::listing_quality_stats(pool, listing_ids).await,
+            DbBackend::Sqlite(pool) => sqlite::listing_quality_stats(pool, listing_ids).await,
         }
     }
 }
