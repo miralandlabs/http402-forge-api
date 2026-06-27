@@ -26,6 +26,8 @@ pub struct ListingPublic {
     pub agent_friendly: bool,
     pub delivery_scheme: String,
     pub preview_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview_pdf_url: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -50,6 +52,8 @@ impl ListingPublic {
         quality: Option<ListingQualityStats>,
     ) -> Self {
         let base = base_url.trim_end_matches('/');
+        let preview_pdf_url = offers_pdf_sample_preview(&row)
+            .then(|| format!("{base}/api/v1/listings/{}/preview-pdf", row.id));
         Self {
             id: row.id,
             seller_wallet: row.seller_wallet,
@@ -64,6 +68,7 @@ impl ListingPublic {
             agent_friendly: row.agent_friendly,
             delivery_scheme: row.delivery_scheme,
             preview_url: format!("{base}/api/v1/listings/{}/preview", row.id),
+            preview_pdf_url,
             tags: parse_tags_json(&row.tags),
             license: row.license,
             content_hash: row.content_hash,
@@ -149,6 +154,30 @@ pub fn validate_wallet(wallet: &str) -> Result<(), String> {
     Ok(())
 }
 
+pub fn offers_pdf_sample_preview(row: &ListingRow) -> bool {
+    let asset_ct = row.content_type.trim().to_ascii_lowercase();
+    if asset_ct != "application/pdf" && asset_ct != "application/x-pdf" {
+        return false;
+    }
+    let preview_ct = row.preview_content_type.trim().to_ascii_lowercase();
+    // Seller-uploaded non-PDF teaser (image/audio/video/text) — render via /preview, not sample PDF.
+    if row.preview_key.ends_with("/preview")
+        && preview_ct != "application/pdf"
+        && preview_ct != "application/x-pdf"
+    {
+        return false;
+    }
+    if preview_ct.starts_with("video/")
+        || preview_ct.starts_with("audio/")
+        || preview_ct.starts_with("text/")
+    {
+        return false;
+    }
+    preview_ct == "application/pdf"
+        || preview_ct == "application/x-pdf"
+        || preview_ct.starts_with("image/")
+}
+
 pub fn text_preview_snippet(text: &str, max: usize) -> String {
     let trimmed = text.trim();
     let char_count = trimmed.chars().count();
@@ -163,6 +192,57 @@ pub fn text_preview_snippet(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
+
+    fn pdf_row(preview_key: &str, preview_content_type: &str) -> ListingRow {
+        ListingRow {
+            id: Uuid::new_v4(),
+            seller_wallet: "seller".into(),
+            display_name: None,
+            title: "t".into(),
+            description: "d".into(),
+            category: "text".into(),
+            price_micro_usdc: 50_000,
+            preview_key: preview_key.into(),
+            preview_content_type: preview_content_type.into(),
+            asset_key: "assets/x/asset".into(),
+            content_type: "application/pdf".into(),
+            byte_size: 100,
+            agent_friendly: false,
+            delivery_scheme: "exact".into(),
+            status: "active".into(),
+            tags: "[]".into(),
+            license: None,
+            content_hash: None,
+            moderation_status: "approved".into(),
+            moderation_labels: "[]".into(),
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn offers_pdf_sample_for_auto_jpeg_thumbnail() {
+        let row = pdf_row("previews/id/preview.jpg", "image/jpeg");
+        assert!(offers_pdf_sample_preview(&row));
+    }
+
+    #[test]
+    fn offers_pdf_sample_for_uploaded_pdf_preview() {
+        let row = pdf_row("previews/id/preview.pdf", "application/pdf");
+        assert!(offers_pdf_sample_preview(&row));
+    }
+
+    #[test]
+    fn skips_pdf_sample_for_custom_image_preview() {
+        let row = pdf_row("previews/id/preview", "image/jpeg");
+        assert!(!offers_pdf_sample_preview(&row));
+    }
+
+    #[test]
+    fn skips_pdf_sample_for_custom_video_preview() {
+        let row = pdf_row("previews/id/preview", "video/mp4");
+        assert!(!offers_pdf_sample_preview(&row));
+    }
 
     #[test]
     fn text_preview_snippet_respects_char_boundary() {

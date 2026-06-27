@@ -69,6 +69,10 @@ pub fn router(state: SharedState) -> Router {
             get(listings::list).post(listings::create),
         )
         .route("/api/v1/listings/{id}/preview", get(listings::preview))
+        .route(
+            "/api/v1/listings/{id}/preview-pdf",
+            get(listings::preview_pdf),
+        )
         .route("/api/v1/listings/{id}/download", get(listings::download))
         .route(
             "/api/v1/listings/{id}/redownload",
