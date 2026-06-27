@@ -60,8 +60,7 @@ async fn scan_openai(
         labels.extend(result.labels);
     }
 
-    if input.asset_content_type.starts_with("image/")
-        && input.asset_content_type != "image/svg+xml"
+    if input.asset_content_type.starts_with("image/") && input.asset_content_type != "image/svg+xml"
     {
         if let Some(result) =
             moderate_image(api_key, input.asset_data, input.asset_content_type).await?
@@ -120,10 +119,7 @@ async fn moderate_image(
     if data.is_empty() {
         return Ok(None);
     }
-    let b64 = base64::Engine::encode(
-        &base64::engine::general_purpose::STANDARD,
-        data.as_ref(),
-    );
+    let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, data.as_ref());
     let data_url = format!("data:{content_type};base64,{b64}");
     let body = serde_json::json!({
         "model": "omni-moderation-latest",
@@ -161,9 +157,10 @@ async fn post_moderation(
         )));
     }
 
-    let parsed: OpenAiModerationResponse = res.json().await.map_err(|e| {
-        AppError::Internal(anyhow::anyhow!("moderation response parse: {e}"))
-    })?;
+    let parsed: OpenAiModerationResponse = res
+        .json()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("moderation response parse: {e}")))?;
 
     let Some(first) = parsed.results.first() else {
         return Ok(None);

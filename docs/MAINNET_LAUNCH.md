@@ -1,6 +1,6 @@
 # Forge Mainnet Launch Checklist
 
-Use this checklist before pointing production traffic at `https://api.http402.trade`.
+Use this checklist before pointing production traffic at `https://forge.http402.trade`.
 
 ## Cluster & payments
 
@@ -26,7 +26,7 @@ Use this checklist before pointing production traffic at `https://api.http402.tr
 
 ## Network & security
 
-- [ ] `SELLER_PUBLIC_BASE_URL=https://api.http402.trade`
+- [ ] `SELLER_PUBLIC_BASE_URL=https://forge.http402.trade`
 - [ ] `CORS_ALLOWED_ORIGINS` includes `https://http402.trade` and `https://www.http402.trade`
 - [ ] TLS termination (nginx/Caddy) with valid certificate; HSTS enabled
 - [ ] `RATE_LIMIT_RPS` set (default 30; set `0` to disable in-process limiter and rely on nginx)
@@ -51,7 +51,7 @@ Use this checklist before pointing production traffic at `https://api.http402.tr
 
 ## Frontend
 
-- [ ] `VITE_API_BASE_URL=https://api.http402.trade`
+- [ ] `VITE_API_BASE_URL=https://forge.http402.trade`
 - [ ] `VITE_FACILITATOR_BASE_URL` → production facilitator
 - [ ] `npm run build` succeeds; deploy static assets to CDN/Pages
 

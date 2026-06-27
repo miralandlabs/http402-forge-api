@@ -107,7 +107,9 @@ pub async fn submit_feedback(
         let challenge_sale = parse_feedback_sale_id(&body.buyer_challenge)
             .ok_or_else(|| AppError::Forbidden("invalid feedback challenge".into()))?;
         if challenge_sale != sale_id {
-            return Err(AppError::Forbidden("feedback challenge sale mismatch".into()));
+            return Err(AppError::Forbidden(
+                "feedback challenge sale mismatch".into(),
+            ));
         }
     }
 

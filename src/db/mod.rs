@@ -10,7 +10,7 @@ pub use listing::ListingRow;
 pub use listing_filters::ListingFilterBinds;
 pub use payment::PaymentRow;
 pub use sales::{LeaderboardListingRow, LeaderboardWalletRow, SaleRow};
-pub use trust::{ListingQualityStats, SaleFeedbackRow, validate_feedback_outcome};
+pub use trust::{validate_feedback_outcome, ListingQualityStats, SaleFeedbackRow};
 
 use deadpool_postgres::Pool as PgPool;
 use deadpool_sqlite::Pool as SqlitePool;
@@ -202,30 +202,34 @@ impl Database {
         }
     }
 
-    pub async fn top_earners_24h(&self) -> AppResult<Vec<LeaderboardWalletRow>> {
+    pub async fn top_earners_24h(&self, limit: u32) -> AppResult<Vec<LeaderboardWalletRow>> {
         match &self.backend {
-            DbBackend::Postgres(pool) => postgres::top_earners_24h(pool).await,
-            DbBackend::Sqlite(pool) => sqlite::top_earners_24h(pool).await,
+            DbBackend::Postgres(pool) => postgres::top_earners_24h(pool, limit).await,
+            DbBackend::Sqlite(pool) => sqlite::top_earners_24h(pool, limit).await,
         }
     }
 
-    pub async fn top_payers_24h(&self) -> AppResult<Vec<LeaderboardWalletRow>> {
+    pub async fn top_payers_24h(&self, limit: u32) -> AppResult<Vec<LeaderboardWalletRow>> {
         match &self.backend {
-            DbBackend::Postgres(pool) => postgres::top_payers_24h(pool).await,
-            DbBackend::Sqlite(pool) => sqlite::top_payers_24h(pool).await,
+            DbBackend::Postgres(pool) => postgres::top_payers_24h(pool, limit).await,
+            DbBackend::Sqlite(pool) => sqlite::top_payers_24h(pool, limit).await,
         }
     }
 
-    pub async fn hottest_listings_24h(&self) -> AppResult<Vec<LeaderboardListingRow>> {
+    pub async fn hottest_listings_24h(&self, limit: u32) -> AppResult<Vec<LeaderboardListingRow>> {
         match &self.backend {
-            DbBackend::Postgres(pool) => postgres::hottest_listings_24h(pool).await,
-            DbBackend::Sqlite(pool) => sqlite::hottest_listings_24h(pool).await,
+            DbBackend::Postgres(pool) => postgres::hottest_listings_24h(pool, limit).await,
+            DbBackend::Sqlite(pool) => sqlite::hottest_listings_24h(pool, limit).await,
         }
     }
 
-    pub async fn listings_missing_preview_content_type(&self) -> AppResult<Vec<(uuid::Uuid, String)>> {
+    pub async fn listings_missing_preview_content_type(
+        &self,
+    ) -> AppResult<Vec<(uuid::Uuid, String)>> {
         match &self.backend {
-            DbBackend::Postgres(pool) => postgres::listings_missing_preview_content_type(pool).await,
+            DbBackend::Postgres(pool) => {
+                postgres::listings_missing_preview_content_type(pool).await
+            }
             DbBackend::Sqlite(pool) => sqlite::listings_missing_preview_content_type(pool).await,
         }
     }
@@ -247,7 +251,9 @@ impl Database {
 
     pub async fn is_content_hash_blocked(&self, content_hash: &str) -> AppResult<bool> {
         match &self.backend {
-            DbBackend::Postgres(pool) => postgres::is_content_hash_blocked(pool, content_hash).await,
+            DbBackend::Postgres(pool) => {
+                postgres::is_content_hash_blocked(pool, content_hash).await
+            }
             DbBackend::Sqlite(pool) => sqlite::is_content_hash_blocked(pool, content_hash).await,
         }
     }
@@ -302,13 +308,25 @@ impl Database {
         match &self.backend {
             DbBackend::Postgres(pool) => {
                 postgres::insert_sale_feedback(
-                    pool, sale_id, listing_id, buyer_wallet, outcome, score, note,
+                    pool,
+                    sale_id,
+                    listing_id,
+                    buyer_wallet,
+                    outcome,
+                    score,
+                    note,
                 )
                 .await
             }
             DbBackend::Sqlite(pool) => {
                 sqlite::insert_sale_feedback(
-                    pool, sale_id, listing_id, buyer_wallet, outcome, score, note,
+                    pool,
+                    sale_id,
+                    listing_id,
+                    buyer_wallet,
+                    outcome,
+                    score,
+                    note,
                 )
                 .await
             }
