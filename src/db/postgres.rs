@@ -9,8 +9,8 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 use uuid::Uuid;
 use webpki_roots::TLS_SERVER_ROOTS;
 
-use super::{LeaderboardListingRow, LeaderboardWalletRow, ListingRow, PaymentRow, SaleRow};
 use super::trust::{ListingQualityStats, SaleFeedbackRow};
+use super::{LeaderboardListingRow, LeaderboardWalletRow, ListingRow, PaymentRow, SaleRow};
 use crate::db::listing_filters::{listing_filter_suffix, ListingFilterBinds};
 use crate::error::{AppError, AppResult};
 use tokio_postgres::types::ToSql;
@@ -428,21 +428,37 @@ pub async fn insert_sale(
     Ok(map_sale(&row))
 }
 
-pub async fn top_earners_24h(pool: &Pool) -> AppResult<Vec<LeaderboardWalletRow>> {
-    query_leaderboard_wallets(pool, "SELECT * FROM leaderboard_earners_24h").await
+pub async fn top_earners_24h(pool: &Pool, limit: u32) -> AppResult<Vec<LeaderboardWalletRow>> {
+    query_leaderboard_wallets(
+        pool,
+        "SELECT * FROM leaderboard_earners_24h LIMIT $1",
+        i64::from(limit),
+    )
+    .await
 }
 
-pub async fn top_payers_24h(pool: &Pool) -> AppResult<Vec<LeaderboardWalletRow>> {
-    query_leaderboard_wallets(pool, "SELECT * FROM leaderboard_payers_24h").await
+pub async fn top_payers_24h(pool: &Pool, limit: u32) -> AppResult<Vec<LeaderboardWalletRow>> {
+    query_leaderboard_wallets(
+        pool,
+        "SELECT * FROM leaderboard_payers_24h LIMIT $1",
+        i64::from(limit),
+    )
+    .await
 }
 
-pub async fn hottest_listings_24h(pool: &Pool) -> AppResult<Vec<LeaderboardListingRow>> {
+pub async fn hottest_listings_24h(
+    pool: &Pool,
+    limit: u32,
+) -> AppResult<Vec<LeaderboardListingRow>> {
     let client = pool
         .get()
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("postgres conn: {e}")))?;
     let rows = client
-        .query("SELECT * FROM leaderboard_hottest_24h", &[])
+        .query(
+            "SELECT * FROM leaderboard_hottest_24h LIMIT $1",
+            &[&i64::from(limit)],
+        )
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("hottest listings: {e}")))?;
     Ok(rows
@@ -456,13 +472,17 @@ pub async fn hottest_listings_24h(pool: &Pool) -> AppResult<Vec<LeaderboardListi
         .collect())
 }
 
-async fn query_leaderboard_wallets(pool: &Pool, sql: &str) -> AppResult<Vec<LeaderboardWalletRow>> {
+async fn query_leaderboard_wallets(
+    pool: &Pool,
+    sql: &str,
+    limit: i64,
+) -> AppResult<Vec<LeaderboardWalletRow>> {
     let client = pool
         .get()
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("postgres conn: {e}")))?;
     let rows = client
-        .query(sql, &[])
+        .query(sql, &[&limit])
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("leaderboard: {e}")))?;
     Ok(rows
@@ -520,9 +540,7 @@ fn map_sale(row: &Row) -> SaleRow {
     }
 }
 
-pub async fn listings_missing_preview_content_type(
-    pool: &Pool,
-) -> AppResult<Vec<(Uuid, String)>> {
+pub async fn listings_missing_preview_content_type(pool: &Pool) -> AppResult<Vec<(Uuid, String)>> {
     let client = pool
         .get()
         .await
@@ -655,7 +673,14 @@ pub async fn insert_sale_feedback(
             INSERT INTO sale_feedback (sale_id, listing_id, buyer_wallet, outcome, score, note)
             VALUES ($1, $2, $3, $4, $5, $6)
             "#,
-            &[&sale_id, &listing_id, &buyer_wallet, &outcome, &score, &note],
+            &[
+                &sale_id,
+                &listing_id,
+                &buyer_wallet,
+                &outcome,
+                &score,
+                &note,
+            ],
         )
         .await
         .map_err(|e| {
@@ -667,7 +692,10 @@ pub async fn insert_sale_feedback(
             }
         })?;
     let row = client
-        .query_one("SELECT * FROM sale_feedback WHERE sale_id = $1", &[&sale_id])
+        .query_one(
+            "SELECT * FROM sale_feedback WHERE sale_id = $1",
+            &[&sale_id],
+        )
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("fetch sale feedback: {e}")))?;
     Ok(map_sale_feedback(&row))

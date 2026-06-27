@@ -5,8 +5,8 @@ use deadpool_sqlite::{Config, Hook, HookError, Pool, PoolConfig, Runtime};
 use rusqlite::{params, Row};
 use uuid::Uuid;
 
-use super::{LeaderboardListingRow, LeaderboardWalletRow, ListingRow, PaymentRow, SaleRow};
 use super::trust::{ListingQualityStats, SaleFeedbackRow};
+use super::{LeaderboardListingRow, LeaderboardWalletRow, ListingRow, PaymentRow, SaleRow};
 use crate::db::listing_filters::{listing_filter_suffix, ListingFilterBinds};
 use crate::error::{AppError, AppResult};
 
@@ -437,31 +437,36 @@ pub async fn insert_sale(
         .map_err(|e| AppError::Internal(anyhow::anyhow!("insert sale: {e}")))
 }
 
-pub async fn top_earners_24h(pool: &Pool) -> AppResult<Vec<LeaderboardWalletRow>> {
+pub async fn top_earners_24h(pool: &Pool, limit: u32) -> AppResult<Vec<LeaderboardWalletRow>> {
     query_leaderboard_wallets(
         pool,
-        "SELECT wallet, amount_micro_usdc, sales_count FROM leaderboard_earners_24h",
+        "SELECT wallet, amount_micro_usdc, sales_count FROM leaderboard_earners_24h LIMIT ?1",
+        limit,
     )
     .await
 }
 
-pub async fn top_payers_24h(pool: &Pool) -> AppResult<Vec<LeaderboardWalletRow>> {
+pub async fn top_payers_24h(pool: &Pool, limit: u32) -> AppResult<Vec<LeaderboardWalletRow>> {
     query_leaderboard_wallets(
         pool,
-        "SELECT wallet, amount_micro_usdc, sales_count FROM leaderboard_payers_24h",
+        "SELECT wallet, amount_micro_usdc, sales_count FROM leaderboard_payers_24h LIMIT ?1",
+        limit,
     )
     .await
 }
 
-pub async fn hottest_listings_24h(pool: &Pool) -> AppResult<Vec<LeaderboardListingRow>> {
+pub async fn hottest_listings_24h(
+    pool: &Pool,
+    limit: u32,
+) -> AppResult<Vec<LeaderboardListingRow>> {
     pool.get()
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite conn: {e}")))?
-        .interact(|conn| -> rusqlite::Result<Vec<LeaderboardListingRow>> {
+        .interact(move |conn| -> rusqlite::Result<Vec<LeaderboardListingRow>> {
             let mut stmt = conn.prepare(
-                "SELECT listing_id, title, sales_count, volume_micro_usdc FROM leaderboard_hottest_24h",
+                "SELECT listing_id, title, sales_count, volume_micro_usdc FROM leaderboard_hottest_24h LIMIT ?1",
             )?;
-            let rows = stmt.query_map([], |row| {
+            let rows = stmt.query_map([limit], |row| {
                 Ok(LeaderboardListingRow {
                     listing_id: parse_uuid(row.get::<_, String>(0)?)?,
                     title: row.get(1)?,
@@ -476,14 +481,18 @@ pub async fn hottest_listings_24h(pool: &Pool) -> AppResult<Vec<LeaderboardListi
         .map_err(|e| AppError::Internal(anyhow::anyhow!("hottest listings: {e}")))
 }
 
-async fn query_leaderboard_wallets(pool: &Pool, sql: &str) -> AppResult<Vec<LeaderboardWalletRow>> {
+async fn query_leaderboard_wallets(
+    pool: &Pool,
+    sql: &str,
+    limit: u32,
+) -> AppResult<Vec<LeaderboardWalletRow>> {
     let sql = sql.to_string();
     pool.get()
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite conn: {e}")))?
         .interact(move |conn| -> rusqlite::Result<Vec<LeaderboardWalletRow>> {
             let mut stmt = conn.prepare(&sql)?;
-            let rows = stmt.query_map([], |row| {
+            let rows = stmt.query_map([limit], |row| {
                 Ok(LeaderboardWalletRow {
                     wallet: row.get(0)?,
                     amount_micro_usdc: row.get(1)?,
@@ -556,9 +565,7 @@ fn parse_datetime(raw: String) -> rusqlite::Result<DateTime<Utc>> {
         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
 }
 
-pub async fn listings_missing_preview_content_type(
-    pool: &Pool,
-) -> AppResult<Vec<(Uuid, String)>> {
+pub async fn listings_missing_preview_content_type(pool: &Pool) -> AppResult<Vec<(Uuid, String)>> {
     let sql = "SELECT id, preview_key FROM listings WHERE preview_content_type = ''".to_string();
     pool.get()
         .await
@@ -773,19 +780,21 @@ pub async fn listing_quality_stats(
     pool.get()
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite conn: {e}")))?
-        .interact(move |conn| -> rusqlite::Result<std::collections::HashMap<Uuid, ListingQualityStats>> {
-            let mut stmt = conn.prepare(&sql)?;
-            let rows = stmt.query_map(rusqlite::params_from_iter(ids), |row| {
-                Ok((
-                    parse_uuid(row.get::<_, String>(0)?)?,
-                    ListingQualityStats {
-                        verified_feedback_count: row.get(1)?,
-                        quality_score: row.get(2)?,
-                    },
-                ))
-            })?;
-            rows.collect::<Result<std::collections::HashMap<_, _>, _>>()
-        })
+        .interact(
+            move |conn| -> rusqlite::Result<std::collections::HashMap<Uuid, ListingQualityStats>> {
+                let mut stmt = conn.prepare(&sql)?;
+                let rows = stmt.query_map(rusqlite::params_from_iter(ids), |row| {
+                    Ok((
+                        parse_uuid(row.get::<_, String>(0)?)?,
+                        ListingQualityStats {
+                            verified_feedback_count: row.get(1)?,
+                            quality_score: row.get(2)?,
+                        },
+                    ))
+                })?;
+                rows.collect::<Result<std::collections::HashMap<_, _>, _>>()
+            },
+        )
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite interact: {e}")))?
         .map_err(|e| AppError::Internal(anyhow::anyhow!("listing quality stats: {e}")))

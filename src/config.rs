@@ -138,6 +138,8 @@ pub struct AppConfig {
     pub object_delivery: ObjectDelivery,
     pub presign_ttl_secs: u32,
     pub version: String,
+    /// Max rows per leaderboard column (24h earners, payers, hottest listings).
+    pub leaderboard_limit: u32,
 }
 
 impl AppConfig {
@@ -232,8 +234,19 @@ impl AppConfig {
             object_delivery: parse_object_delivery(storage_backend),
             presign_ttl_secs: env_u32("PRESIGN_TTL_SECS", 300),
             version: std::env::var("FORGE_VERSION").unwrap_or_else(|_| "0.1.0".into()),
+            leaderboard_limit: parse_leaderboard_limit()?,
         })
     }
+}
+
+fn parse_leaderboard_limit() -> Result<u32, String> {
+    let limit = env_u32("FORGE_LEADERBOARD_LIMIT", 5);
+    if !(1..=20).contains(&limit) {
+        return Err(format!(
+            "FORGE_LEADERBOARD_LIMIT must be between 1 and 20; got {limit}"
+        ));
+    }
+    Ok(limit)
 }
 
 fn parse_object_delivery(storage_backend: StorageBackend) -> ObjectDelivery {

@@ -337,6 +337,8 @@ Legacy listings that stored a text placeholder for video/audio fall back to stre
 GET /api/v1/leaderboards
 ```
 
+Returns up to **`FORGE_LEADERBOARD_LIMIT`** rows per column (default **5**, max **20**): top earners, top payers, and hottest listings in the rolling 24h window.
+
 ```json
 {
   "top_earners_24h": [{"wallet": "...", "amount_micro_usdc": 150000, "sales_count": 3}],
