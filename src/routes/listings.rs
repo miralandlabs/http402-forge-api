@@ -13,8 +13,8 @@ use crate::db::ListingFilterBinds;
 use crate::db::ListingRow;
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    parse_price_usdc, parse_tags_field, tags_to_json, text_preview_snippet, validate_category,
-    validate_license, validate_wallet, offers_pdf_sample_preview, ListingPublic,
+    offers_pdf_sample_preview, parse_price_usdc, parse_tags_field, tags_to_json,
+    text_preview_snippet, validate_category, validate_license, validate_wallet, ListingPublic,
 };
 use crate::moderation::{moderation_labels_json, scan_listing_upload, ListingModerationInput};
 use crate::preview::{
@@ -161,7 +161,7 @@ pub async fn preview_pdf(
     if !offers_pdf_sample_preview(&row) {
         return Err(AppError::NotFound);
     }
-    let sample_key = ensure_pdf_page_sample(&state, &row).await?;
+    let sample_key = resolve_pdf_detail_sample_key(&state, &row).await?;
     let format = delivery_q.format(&state.config)?;
     serve_object(
         &state,
@@ -181,11 +181,28 @@ fn pdf_sample_preview_key(id: Uuid) -> String {
     object_key("previews", id, "preview-sample.pdf")
 }
 
-async fn store_pdf_page_sample(
+async fn store_full_pdf_preview_sample(
     state: &SharedState,
     id: Uuid,
-    source_pdf: &Bytes,
+    pdf: &Bytes,
 ) -> AppResult<()> {
+    if pdf.len() as u64 > state.config.max_preview_bytes {
+        tracing::warn!(
+            listing_id = %id,
+            bytes = pdf.len(),
+            max = state.config.max_preview_bytes,
+            "uploaded PDF preview exceeds max preview bytes; skipping detail sample"
+        );
+        return Ok(());
+    }
+    state
+        .storage
+        .put(&pdf_sample_preview_key(id), "application/pdf", pdf.clone())
+        .await?;
+    Ok(())
+}
+
+async fn store_pdf_page_sample(state: &SharedState, id: Uuid, source_pdf: &Bytes) -> AppResult<()> {
     match generate_pdf_page_sample(source_pdf, &state.config).await {
         Ok(sample) => {
             if sample.len() as u64 > state.config.max_preview_bytes {
@@ -199,11 +216,7 @@ async fn store_pdf_page_sample(
             }
             state
                 .storage
-                .put(
-                    &pdf_sample_preview_key(id),
-                    "application/pdf",
-                    sample,
-                )
+                .put(&pdf_sample_preview_key(id), "application/pdf", sample)
                 .await?;
         }
         Err(e) => {
@@ -211,6 +224,27 @@ async fn store_pdf_page_sample(
         }
     }
     Ok(())
+}
+
+/// Seller uploaded a standalone PDF preview file (not rasterized to JPEG for the grid).
+fn seller_uploaded_pdf_preview_key(row: &ListingRow) -> bool {
+    is_pdf_content_type(&row.preview_content_type)
+        && row.preview_key != row.asset_key
+        && row.preview_key.ends_with("/preview.pdf")
+}
+
+async fn resolve_pdf_detail_sample_key(state: &SharedState, row: &ListingRow) -> AppResult<String> {
+    if !offers_pdf_sample_preview(row) {
+        return Err(AppError::NotFound);
+    }
+    let sample_key = pdf_sample_preview_key(row.id);
+    if state.storage.head(&sample_key).await.is_ok() {
+        return Ok(sample_key);
+    }
+    if seller_uploaded_pdf_preview_key(row) {
+        return Ok(row.preview_key.clone());
+    }
+    ensure_pdf_page_sample(state, row).await
 }
 
 async fn pdf_sample_source_bytes(state: &SharedState, row: &ListingRow) -> AppResult<Bytes> {
@@ -235,7 +269,11 @@ async fn ensure_pdf_page_sample(state: &SharedState, row: &ListingRow) -> AppRes
     }
     let source = pdf_sample_source_bytes(state, row).await?;
     store_pdf_page_sample(state, row.id, &source).await?;
-    state.storage.head(&key).await.map_err(|_| AppError::NotFound)?;
+    state
+        .storage
+        .head(&key)
+        .await
+        .map_err(|_| AppError::NotFound)?;
     Ok(key)
 }
 
@@ -872,7 +910,7 @@ async fn store_uploaded_preview(
         match generate_pdf_first_page_jpeg(preview_data, &state.config).await {
             Ok(jpeg) => {
                 state.storage.put(&key, "image/jpeg", jpeg).await?;
-                store_pdf_page_sample(state, id, preview_data).await?;
+                store_full_pdf_preview_sample(state, id, preview_data).await?;
                 return Ok((key, "image/jpeg".to_string()));
             }
             Err(e) => {
@@ -885,7 +923,6 @@ async fn store_uploaded_preview(
                     .storage
                     .put(&key, preview_ct, preview_data.clone())
                     .await?;
-                store_pdf_page_sample(state, id, preview_data).await?;
                 return Ok((key, preview_ct.to_string()));
             }
         }
