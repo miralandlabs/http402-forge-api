@@ -78,10 +78,8 @@ mod tests {
 
     #[test]
     fn quality_score_averages_outcomes() {
-        let stats = compute_quality_score(&[
-            ("as_described".into(), 1),
-            ("hash_mismatch".into(), 1),
-        ]);
+        let stats =
+            compute_quality_score(&[("as_described".into(), 1), ("hash_mismatch".into(), 1)]);
         assert_eq!(stats.quality_score, 50);
         assert_eq!(stats.verified_feedback_count, 2);
     }

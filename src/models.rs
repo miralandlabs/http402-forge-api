@@ -2,8 +2,8 @@ use chrono::Utc;
 use serde::Serialize;
 use uuid::Uuid;
 
-use crate::db::ListingRow;
 use crate::db::ListingQualityStats;
+use crate::db::ListingRow;
 
 pub const CATEGORIES: &[&str] = &["art", "text", "audio", "video", "prompt_pack"];
 
@@ -113,7 +113,10 @@ pub fn validate_license(license: Option<&str>) -> Result<(), String> {
     match license {
         None => Ok(()),
         Some(l) if LICENSES.contains(&l) => Ok(()),
-        Some(l) => Err(format!("license must be one of: {} (got '{l}')", LICENSES.join(", "))),
+        Some(l) => Err(format!(
+            "license must be one of: {} (got '{l}')",
+            LICENSES.join(", ")
+        )),
     }
 }
 

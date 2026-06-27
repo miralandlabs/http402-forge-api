@@ -62,7 +62,9 @@ impl AppState {
                     }
                 }
                 Ok(_) => tracing::warn!(listing_id = %id, "preview object missing content-type"),
-                Err(e) => tracing::warn!(listing_id = %id, error = %e, "preview head failed during backfill"),
+                Err(e) => {
+                    tracing::warn!(listing_id = %id, error = %e, "preview head failed during backfill")
+                }
             }
         }
         Ok(())

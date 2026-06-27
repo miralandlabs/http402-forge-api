@@ -11,7 +11,8 @@ fn portal_base_url(seller_public_base_url: &str) -> &'static str {
         || seller_public_base_url.contains("preview.http402")
     {
         "https://preview.http402.trade"
-    } else if seller_public_base_url.contains("127.0.0.1") || seller_public_base_url.contains("localhost")
+    } else if seller_public_base_url.contains("127.0.0.1")
+        || seller_public_base_url.contains("localhost")
     {
         "http://127.0.0.1:5175"
     } else {
@@ -72,7 +73,10 @@ pub async fn x402_resources(State(state): State<SharedState>) -> Json<serde_json
 
 pub async fn openapi_spec() -> Response {
     (
-        [(header::CONTENT_TYPE, HeaderValue::from_static("application/yaml"))],
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/yaml"),
+        )],
         include_str!("../../docs/openapi.yaml"),
     )
         .into_response()

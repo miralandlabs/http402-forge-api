@@ -216,10 +216,7 @@ impl Database {
         }
     }
 
-    pub async fn hottest_listings_24h(
-        &self,
-        limit: u32,
-    ) -> AppResult<Vec<LeaderboardListingRow>> {
+    pub async fn hottest_listings_24h(&self, limit: u32) -> AppResult<Vec<LeaderboardListingRow>> {
         match &self.backend {
             DbBackend::Postgres(pool) => postgres::hottest_listings_24h(pool, limit).await,
             DbBackend::Sqlite(pool) => sqlite::hottest_listings_24h(pool, limit).await,
