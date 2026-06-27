@@ -74,9 +74,11 @@ The API looks up `ffmpeg` and `pdftoppm` on **`PATH`** by default. If binaries l
 ## Docs
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
-- [docs/AGENT_API.md](docs/AGENT_API.md)
-- [docs/openapi.yaml](docs/openapi.yaml)
+- [docs/AGENT_API.md](docs/AGENT_API.md) — agent-first integration guide
+- [docs/openapi.yaml](docs/openapi.yaml) — also served at `GET /openapi.yaml` on the API host
 - [docs/SELLER_GUIDE.md](docs/SELLER_GUIDE.md)
+
+**Agent ecosystem index:** `GET https://http402.trade/.well-known/x402-portal.json` (preview: `preview.http402.trade`).
 
 ## Devnet E2E
 

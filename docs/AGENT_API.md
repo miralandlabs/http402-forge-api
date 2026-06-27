@@ -1,10 +1,26 @@
 # Forge Agent API
 
-Machine-readable listing, purchase, and lifecycle API for autonomous agents. Human UI uses the same routes.
+**Audience:** autonomous buyer and seller agents first; humans use the same HTTP routes via the web UI.
+
+**Ecosystem router (all http402.trade channels):**
+
+```http
+GET https://http402.trade/.well-known/x402-portal.json
+```
+
+Preview mirror: `https://preview.http402.trade/.well-known/x402-portal.json`. Resolve `{forgeApi}` placeholders per environment block in that manifest.
+
+This document covers **Forge (Digital Bazaar channel)** only — catalog + 402 checkout for digital goods.
+
+Machine-readable listing, purchase, and lifecycle API. Human UI uses the same routes.
 
 **Wire format:** all JSON responses use **camelCase** keys (e.g. `priceMicroUsdc`, `sellerWallet`).
 
-Base URL: `https://api.http402.trade` (or your deployed `SELLER_PUBLIC_BASE_URL`).
+| Environment | Forge API base (`SELLER_PUBLIC_BASE_URL`) | Portal origin |
+|-------------|-------------------------------------------|---------------|
+| Production | `https://forge.http402.trade` | `https://http402.trade` |
+| Preview | `https://preview.forge.http402.trade` | `https://preview.http402.trade` |
+| Local | `http://127.0.0.1:8092` | `http://127.0.0.1:5175` |
 
 ## Agent discovery
 
@@ -75,7 +91,7 @@ Response:
       "contentHash": "a1b2c3…",
       "qualityScore": 92,
       "verifiedFeedbackCount": 3,
-      "previewUrl": "https://api.http402.trade/api/v1/listings/550e8400-e29b-41d4-a716-446655440000/preview",
+      "previewUrl": "https://forge.http402.trade/api/v1/listings/550e8400-e29b-41d4-a716-446655440000/preview",
       "createdAt": "2026-06-24T12:00:00Z"
     }
   ],
@@ -289,8 +305,9 @@ Before storage, uploads may be scanned when `MODERATION_PROVIDER=openai` (requir
 
 ## Discovery
 
-Register payable download URLs via `/.well-known/x402-resources.json` on this service (URL template only). Enumerate products with `GET /api/v1/listings` — see **Agent discovery** above.
+1. **Ecosystem index:** `GET {portal}/.well-known/x402-portal.json` — routes agents to Forge, Tools, and sibling channels without HTML.
+2. **Forge payable template:** `GET {FORGE_API}/.well-known/x402-resources.json` — download URL pattern (`{id}` placeholder) plus `agentDiscovery.catalog`.
+3. **Product inventory:** `GET {FORGE_API}/api/v1/listings` — enumerate SKUs (not in x402-resources alone).
+4. **OpenAPI:** `GET {FORGE_API}/openapi.yaml` — full HTTP shape for codegen.
 
-## OpenAPI
-
-Full machine-readable spec: [openapi.yaml](./openapi.yaml).
+Register payable download URLs via pr402 seller manifests using the resource template from step 2. Enumerate products with step 3 — see **Agent discovery** above.

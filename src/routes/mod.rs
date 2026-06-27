@@ -116,6 +116,7 @@ pub fn router(state: SharedState) -> Router {
             "/.well-known/x402-resources.json",
             get(well_known::x402_resources),
         )
+        .route("/openapi.yaml", get(well_known::openapi_spec))
         .layer(DefaultBodyLimit::max(max_body as usize))
         .layer(RequestBodyLimitLayer::new(max_body as usize))
         .layer(cors)

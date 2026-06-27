@@ -3,11 +3,19 @@ info:
   title: http402-forge-api
   version: 0.1.0
   description: |
-    Forge marketplace — list, preview, pay-to-download via x402 v2.
+    Forge marketplace (Digital Bazaar channel) — list, preview, pay-to-download via x402 v2.
     JSON responses use **camelCase** field names.
+
+    **Agents:** start at `GET https://http402.trade/.well-known/x402-portal.json` for the
+    http402.trade channel router. Forge API discovery: `GET /.well-known/x402-resources.json`.
+    Human-written guide: [AGENT_API.md](https://github.com/miralandlabs/http402-forge-api/blob/main/docs/AGENT_API.md).
 servers:
-  - url: https://api.http402.trade
+  - url: https://forge.http402.trade
+    description: Production (mainnet)
+  - url: https://preview.forge.http402.trade
+    description: Preview (devnet)
   - url: http://127.0.0.1:8092
+    description: Local dev
 components:
   schemas:
     ListingPublic:
@@ -150,6 +158,24 @@ components:
         error: { type: string }
         message: { type: string }
 paths:
+  /.well-known/x402-resources.json:
+    get:
+      summary: Forge x402 resource template and agent discovery hints
+      description: |
+        Payable download URL pattern (`{id}` placeholder). Full SKU list via GET /api/v1/listings.
+        Includes hubUrl and portalManifestUrl for http402.trade ecosystem routing.
+      responses:
+        "200":
+          description: x402 resources manifest
+  /openapi.yaml:
+    get:
+      summary: OpenAPI 3.1 spec (this document)
+      responses:
+        "200":
+          description: YAML OpenAPI document
+          content:
+            application/yaml:
+              schema: { type: string }
   /api/v1/seller/challenge:
     get:
       summary: Issue a one-time challenge for listing creation

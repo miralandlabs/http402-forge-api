@@ -1,6 +1,8 @@
 # http402-forge-api — Architecture
 
-Standalone marketplace API for [http402.trade](https://http402.trade). Creators list digital goods; buyers pay via **pr402** `exact` rail; the API streams files from **Cloudflare R2** (or local disk in dev).
+Standalone marketplace API for [http402.trade](https://http402.trade) (Digital Bazaar channel). Creators list digital goods; buyers pay via **pr402** `exact` rail; the API streams files from **Cloudflare R2** (or local disk in dev).
+
+**Agents:** resolve channels via `GET https://http402.trade/.well-known/x402-portal.json`; Forge-specific discovery via `GET /.well-known/x402-resources.json` on this API host (`forge.http402.trade`).
 
 ## Components
 
