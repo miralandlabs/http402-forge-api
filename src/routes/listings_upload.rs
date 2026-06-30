@@ -5,7 +5,9 @@ use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
 use crate::models::validate_wallet;
-use crate::routes::listings::{publish_listing, require_seller_vault, PublishListingInput};
+use crate::routes::listings::{
+    ensure_exact_lane_upload, publish_listing, require_seller_vault, PublishListingInput,
+};
 use crate::state::SharedState;
 use crate::storage::{object_key, supports_presigned_upload, ObjectStore, PresignedPut};
 
@@ -70,6 +72,7 @@ pub async fn upload_session(
             state.config.max_asset_bytes
         )));
     }
+    ensure_exact_lane_upload(&state, body.asset_byte_size)?;
     if let Some(preview_size) = body.preview_byte_size {
         if preview_size > state.config.max_preview_bytes {
             return Err(AppError::BadRequest(format!(
@@ -235,6 +238,8 @@ pub struct CapabilitiesResponse {
     pub presigned_upload: bool,
     pub presigned_download: bool,
     pub object_delivery: &'static str,
+    pub escrow_size_threshold_bytes: u64,
+    pub escrow_lane_enabled: bool,
 }
 
 pub async fn capabilities(State(state): State<SharedState>) -> Json<CapabilitiesResponse> {
@@ -245,5 +250,7 @@ pub async fn capabilities(State(state): State<SharedState>) -> Json<Capabilities
             crate::config::ObjectDelivery::Redirect => "redirect",
             crate::config::ObjectDelivery::Proxy => "proxy",
         },
+        escrow_size_threshold_bytes: state.config.escrow_size_threshold,
+        escrow_lane_enabled: false,
     })
 }

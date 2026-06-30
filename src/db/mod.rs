@@ -9,7 +9,7 @@ mod trust;
 pub use listing::ListingRow;
 pub use listing_filters::ListingFilterBinds;
 pub use payment::PaymentRow;
-pub use sales::{LeaderboardListingRow, LeaderboardWalletRow, SaleRow};
+pub use sales::{BuyerPurchaseRow, LeaderboardListingRow, LeaderboardWalletRow, SaleRow};
 pub use trust::{validate_feedback_outcome, ListingQualityStats, SaleFeedbackRow};
 
 use deadpool_postgres::Pool as PgPool;
@@ -168,6 +168,43 @@ impl Database {
         }
     }
 
+    pub async fn record_payment_and_sale(
+        &self,
+        idempotency_key: &str,
+        listing_id: uuid::Uuid,
+        seller_wallet: &str,
+        buyer_wallet: &str,
+        amount_micro_usdc: i64,
+        tx_signature: &str,
+    ) -> AppResult<SaleRow> {
+        match &self.backend {
+            DbBackend::Postgres(pool) => {
+                postgres::record_payment_and_sale(
+                    pool,
+                    idempotency_key,
+                    listing_id,
+                    seller_wallet,
+                    buyer_wallet,
+                    amount_micro_usdc,
+                    tx_signature,
+                )
+                .await
+            }
+            DbBackend::Sqlite(pool) => {
+                sqlite::record_payment_and_sale(
+                    pool,
+                    idempotency_key,
+                    listing_id,
+                    seller_wallet,
+                    buyer_wallet,
+                    amount_micro_usdc,
+                    tx_signature,
+                )
+                .await
+            }
+        }
+    }
+
     pub async fn insert_sale(
         &self,
         listing_id: uuid::Uuid,
@@ -292,6 +329,29 @@ impl Database {
             }
             DbBackend::Sqlite(pool) => {
                 sqlite::find_buyer_sale_for_listing(pool, listing_id, buyer_wallet).await
+            }
+        }
+    }
+
+    pub async fn count_buyer_purchases(&self, buyer_wallet: &str) -> AppResult<i64> {
+        match &self.backend {
+            DbBackend::Postgres(pool) => postgres::count_buyer_purchases(pool, buyer_wallet).await,
+            DbBackend::Sqlite(pool) => sqlite::count_buyer_purchases(pool, buyer_wallet).await,
+        }
+    }
+
+    pub async fn list_buyer_purchases(
+        &self,
+        buyer_wallet: &str,
+        limit: i64,
+        offset: i64,
+    ) -> AppResult<Vec<BuyerPurchaseRow>> {
+        match &self.backend {
+            DbBackend::Postgres(pool) => {
+                postgres::list_buyer_purchases(pool, buyer_wallet, limit, offset).await
+            }
+            DbBackend::Sqlite(pool) => {
+                sqlite::list_buyer_purchases(pool, buyer_wallet, limit, offset).await
             }
         }
     }

@@ -160,6 +160,14 @@ components:
         error: { type: string }
         message: { type: string }
 paths:
+  /health:
+    get:
+      summary: Extended health (database, storage, facilitator)
+      responses:
+        "200":
+          description: All subchecks OK
+        "503":
+          description: Degraded (one or more subchecks failed)
   /.well-known/x402-resources.json:
     get:
       summary: Forge x402 resource template and agent discovery hints
@@ -180,10 +188,10 @@ paths:
               schema: { type: string }
   /api/v1/capabilities:
     get:
-      summary: Server capabilities (presigned upload/download, delivery mode)
+      summary: Server capabilities (presigned upload/download, delivery mode, escrow limits)
       responses:
         "200":
-          description: Capabilities JSON (camelCase)
+          description: Capabilities JSON (camelCase; includes escrowSizeThresholdBytes, escrowLaneEnabled)
   /api/v1/listings/upload-session:
     post:
       summary: Start presigned R2 upload session (seller-signed)
@@ -567,6 +575,48 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorBody" }
+  /api/v1/buyer/purchases:
+    get:
+      summary: List purchases for a buyer wallet (buyer-signed)
+      parameters:
+        - in: query
+          name: buyer_wallet
+          required: true
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - in: query
+          name: offset
+          schema: { type: integer, minimum: 0, default: 0 }
+        - in: header
+          name: X-Forge-Buyer-Wallet
+          required: true
+          schema: { type: string }
+          description: Base64-encoded buyer wallet string
+        - in: header
+          name: X-Forge-Buyer-Challenge
+          required: true
+          schema: { type: string }
+          description: Base64-encoded message from /api/v1/buyer/purchases-challenge
+        - in: header
+          name: X-Forge-Buyer-Signature
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Paginated purchase history (camelCase items + total)
+  /api/v1/buyer/purchases-challenge:
+    get:
+      summary: Issue a one-time challenge to list buyer purchase history
+      parameters:
+        - in: query
+          name: buyer_wallet
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Challenge message to sign with buyer wallet
   /api/v1/buyer/redownload-challenge:
     get:
       summary: Issue a one-time challenge to re-download a prior purchase
@@ -665,7 +715,7 @@ paths:
       summary: 24h leaderboard aggregates
       responses:
         "200":
-          description: Leaderboard JSON
+          description: Leaderboard JSON (camelCase topEarners24h, topPayers24h, hottestListings24h)
   /api/v1/events:
     get:
       summary: SSE sales feed

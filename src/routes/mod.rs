@@ -1,3 +1,4 @@
+mod buyer_purchases;
 mod buyer_redownload;
 mod events;
 mod health;
@@ -98,6 +99,14 @@ pub fn router(state: SharedState) -> Router {
         .route(
             "/api/v1/buyer/redownload-challenge",
             get(buyer_redownload::redownload_challenge),
+        )
+        .route(
+            "/api/v1/buyer/purchases-challenge",
+            get(buyer_purchases::purchases_challenge),
+        )
+        .route(
+            "/api/v1/buyer/purchases",
+            get(buyer_purchases::list_purchases),
         )
         .route("/api/v1/seller/status", get(seller::status))
         .route("/api/v1/seller/provision-tx", post(seller::provision_tx))

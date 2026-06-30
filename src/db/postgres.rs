@@ -11,6 +11,7 @@ use webpki_roots::TLS_SERVER_ROOTS;
 
 use super::trust::{ListingQualityStats, SaleFeedbackRow};
 use super::{LeaderboardListingRow, LeaderboardWalletRow, ListingRow, PaymentRow, SaleRow};
+use super::sales::BuyerPurchaseRow;
 use crate::db::listing_filters::{listing_filter_suffix, ListingFilterBinds};
 use crate::error::{AppError, AppResult};
 use tokio_postgres::types::ToSql;
@@ -391,6 +392,111 @@ pub async fn insert_payment(
     Ok(())
 }
 
+pub async fn record_payment_and_sale(
+    pool: &Pool,
+    idempotency_key: &str,
+    listing_id: Uuid,
+    seller_wallet: &str,
+    buyer_wallet: &str,
+    amount_micro_usdc: i64,
+    tx_signature: &str,
+) -> AppResult<SaleRow> {
+    let mut client = pool
+        .get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("postgres conn: {e}")))?;
+    let transaction = client
+        .transaction()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("begin tx: {e}")))?;
+
+    if let Some(existing) = transaction
+        .query_opt(
+            "SELECT buyer_wallet, tx_signature FROM payments WHERE idempotency_key = $1",
+            &[&idempotency_key],
+        )
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("payment lookup: {e}")))?
+    {
+        let existing_buyer: String = existing.get(0);
+        let existing_tx: String = existing.get(1);
+        if let Some(sale) =
+            find_sale_by_payment_in_client(&transaction, listing_id, &existing_buyer, &existing_tx)
+                .await?
+        {
+            transaction
+                .commit()
+                .await
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("commit tx: {e}")))?;
+            return Ok(sale);
+        }
+    }
+
+    transaction
+        .execute(
+            r#"
+            INSERT INTO payments (idempotency_key, listing_id, buyer_wallet, tx_signature)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (idempotency_key) DO NOTHING
+            "#,
+            &[&idempotency_key, &listing_id, &buyer_wallet, &tx_signature],
+        )
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("insert payment: {e}")))?;
+
+    let sale_id = Uuid::new_v4();
+    transaction
+        .execute(
+            r#"
+            INSERT INTO sales (id, listing_id, seller_wallet, buyer_wallet, amount_micro_usdc, tx_signature)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            "#,
+            &[
+                &sale_id,
+                &listing_id,
+                &seller_wallet,
+                &buyer_wallet,
+                &amount_micro_usdc,
+                &tx_signature,
+            ],
+        )
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("insert sale: {e}")))?;
+
+    let row = transaction
+        .query_one("SELECT * FROM sales WHERE id = $1", &[&sale_id])
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("fetch sale: {e}")))?;
+
+    transaction
+        .commit()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("commit tx: {e}")))?;
+
+    Ok(map_sale(&row))
+}
+
+async fn find_sale_by_payment_in_client(
+    client: &tokio_postgres::Transaction<'_>,
+    listing_id: Uuid,
+    buyer_wallet: &str,
+    tx_signature: &str,
+) -> AppResult<Option<SaleRow>> {
+    let row = client
+        .query_opt(
+            r#"
+            SELECT * FROM sales
+            WHERE listing_id = $1 AND buyer_wallet = $2 AND tx_signature = $3
+            ORDER BY settled_at DESC
+            LIMIT 1
+            "#,
+            &[&listing_id, &buyer_wallet, &tx_signature],
+        )
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("find sale: {e}")))?;
+    Ok(row.as_ref().map(map_sale))
+}
+
 pub async fn insert_sale(
     pool: &Pool,
     listing_id: Uuid,
@@ -652,6 +758,70 @@ pub async fn find_buyer_sale_for_listing(
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("find buyer sale: {e}")))?;
     Ok(row.as_ref().map(map_sale))
+}
+
+pub async fn count_buyer_purchases(pool: &Pool, buyer_wallet: &str) -> AppResult<i64> {
+    let client = pool
+        .get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("postgres conn: {e}")))?;
+    let row = client
+        .query_one(
+            "SELECT COUNT(*)::BIGINT AS total FROM sales WHERE buyer_wallet = $1",
+            &[&buyer_wallet],
+        )
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("count buyer purchases: {e}")))?;
+    Ok(row.get("total"))
+}
+
+pub async fn list_buyer_purchases(
+    pool: &Pool,
+    buyer_wallet: &str,
+    limit: i64,
+    offset: i64,
+) -> AppResult<Vec<BuyerPurchaseRow>> {
+    let client = pool
+        .get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("postgres conn: {e}")))?;
+    let rows = client
+        .query(
+            r#"
+            SELECT s.id AS sale_id,
+                   s.listing_id,
+                   s.seller_wallet,
+                   s.amount_micro_usdc,
+                   s.tx_signature,
+                   s.settled_at,
+                   l.title AS listing_title,
+                   l.status AS listing_status,
+                   sf.outcome AS feedback_outcome
+            FROM sales s
+            JOIN listings l ON l.id = s.listing_id
+            LEFT JOIN sale_feedback sf ON sf.sale_id = s.id
+            WHERE s.buyer_wallet = $1
+            ORDER BY s.settled_at DESC
+            LIMIT $2 OFFSET $3
+            "#,
+            &[&buyer_wallet, &limit, &offset],
+        )
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("list buyer purchases: {e}")))?;
+    Ok(rows
+        .iter()
+        .map(|row| BuyerPurchaseRow {
+            sale_id: row.get("sale_id"),
+            listing_id: row.get("listing_id"),
+            listing_title: row.get("listing_title"),
+            listing_status: row.get("listing_status"),
+            seller_wallet: row.get("seller_wallet"),
+            amount_micro_usdc: row.get("amount_micro_usdc"),
+            tx_signature: row.get("tx_signature"),
+            settled_at: row.get("settled_at"),
+            feedback_outcome: row.get("feedback_outcome"),
+        })
+        .collect())
 }
 
 pub async fn insert_sale_feedback(

@@ -17,6 +17,7 @@ pub struct PaymentContext {
     pub payment_signature: String,
     pub settle_proof: Value,
     pub already_paid: bool,
+    pub idempotency_key: String,
 }
 
 pub struct PaymentGate;
@@ -138,6 +139,7 @@ impl PaymentGate {
                 payment_signature: existing.tx_signature,
                 settle_proof: json!({}),
                 already_paid: true,
+                idempotency_key: idem,
             });
         }
 
@@ -166,7 +168,14 @@ impl PaymentGate {
 
         state
             .db
-            .insert_payment(&idem, listing.id, &payer, &tx_sig)
+            .record_payment_and_sale(
+                &idem,
+                listing.id,
+                &listing.seller_wallet,
+                &payer,
+                listing.price_micro_usdc,
+                &tx_sig,
+            )
             .await?;
 
         Ok(PaymentContext {
@@ -174,6 +183,7 @@ impl PaymentGate {
             payment_signature: sig,
             settle_proof: settle,
             already_paid: false,
+            idempotency_key: idem,
         })
     }
 
@@ -219,6 +229,7 @@ impl PaymentGate {
             payment_signature: existing.tx_signature,
             settle_proof: json!({}),
             already_paid: true,
+            idempotency_key: idem,
         })
     }
 

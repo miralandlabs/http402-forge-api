@@ -7,6 +7,7 @@ use crate::error::AppResult;
 use crate::state::SharedState;
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LeaderboardsResponse {
     pub top_earners_24h: Vec<LeaderboardWalletRow>,
     pub top_payers_24h: Vec<LeaderboardWalletRow>,

@@ -157,6 +157,10 @@ impl Facilitator {
             .map_err(|e| FacilitatorExtError::Http(e.to_string()))
     }
 
+    pub async fn ping_supported(&self) -> bool {
+        self.fetch_supported().await.is_ok()
+    }
+
     pub async fn enrich_accepts(
         &self,
         mut lines: Vec<Value>,

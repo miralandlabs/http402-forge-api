@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use super::trust::{ListingQualityStats, SaleFeedbackRow};
 use super::{LeaderboardListingRow, LeaderboardWalletRow, ListingRow, PaymentRow, SaleRow};
+use super::sales::BuyerPurchaseRow;
 use crate::db::listing_filters::{listing_filter_suffix, ListingFilterBinds};
 use crate::error::{AppError, AppResult};
 
@@ -392,6 +393,102 @@ pub async fn insert_payment(
     Ok(())
 }
 
+pub async fn record_payment_and_sale(
+    pool: &Pool,
+    idempotency_key: &str,
+    listing_id: Uuid,
+    seller_wallet: &str,
+    buyer_wallet: &str,
+    amount_micro_usdc: i64,
+    tx_signature: &str,
+) -> AppResult<SaleRow> {
+    let idempotency_key = idempotency_key.to_string();
+    let listing_id_s = listing_id.to_string();
+    let seller_wallet = seller_wallet.to_string();
+    let buyer_wallet = buyer_wallet.to_string();
+    let tx_signature = tx_signature.to_string();
+    let sale_id = Uuid::new_v4();
+    let sale_id_s = sale_id.to_string();
+    pool.get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite conn: {e}")))?
+        .interact(move |conn| -> rusqlite::Result<SaleRow> {
+            conn.execute("BEGIN IMMEDIATE", [])?;
+            let result = (|| -> rusqlite::Result<SaleRow> {
+                let mut stmt = conn.prepare(
+                    "SELECT buyer_wallet, tx_signature FROM payments WHERE idempotency_key = ?1",
+                )?;
+                let mut rows = stmt.query(params![idempotency_key])?;
+                if let Some(row) = rows.next()? {
+                    let existing_buyer: String = row.get(0)?;
+                    let existing_tx: String = row.get(1)?;
+                    let mut sale_stmt = conn.prepare(
+                        "SELECT id, listing_id, seller_wallet, buyer_wallet, amount_micro_usdc, tx_signature, settled_at
+                         FROM sales
+                         WHERE listing_id = ?1 AND buyer_wallet = ?2 AND tx_signature = ?3
+                         ORDER BY settled_at DESC
+                         LIMIT 1",
+                    )?;
+                    let mut sale_rows =
+                        sale_stmt.query(params![listing_id_s, existing_buyer, existing_tx])?;
+                    if let Some(sale_row) = sale_rows.next()? {
+                        return map_sale(sale_row);
+                    }
+                }
+
+                conn.execute(
+                    r#"
+                    INSERT INTO payments (idempotency_key, listing_id, buyer_wallet, tx_signature)
+                    VALUES (?1, ?2, ?3, ?4)
+                    ON CONFLICT (idempotency_key) DO NOTHING
+                    "#,
+                    params![
+                        idempotency_key,
+                        listing_id_s,
+                        buyer_wallet,
+                        tx_signature
+                    ],
+                )?;
+
+                conn.execute(
+                    r#"
+                    INSERT INTO sales (id, listing_id, seller_wallet, buyer_wallet, amount_micro_usdc, tx_signature)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                    "#,
+                    params![
+                        sale_id_s,
+                        listing_id_s,
+                        seller_wallet,
+                        buyer_wallet,
+                        amount_micro_usdc,
+                        tx_signature
+                    ],
+                )?;
+
+                let mut stmt = conn.prepare(
+                    "SELECT id, listing_id, seller_wallet, buyer_wallet, amount_micro_usdc, tx_signature, settled_at
+                     FROM sales WHERE id = ?1",
+                )?;
+                let mut rows = stmt.query(params![sale_id_s])?;
+                let row = rows.next()?.expect("sale row");
+                map_sale(row)
+            })();
+            match result {
+                Ok(sale) => {
+                    conn.execute("COMMIT", [])?;
+                    Ok(sale)
+                }
+                Err(e) => {
+                    let _ = conn.execute("ROLLBACK", []);
+                    Err(e)
+                }
+            }
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite interact: {e}")))?
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("record payment and sale: {e}")))
+}
+
 pub async fn insert_sale(
     pool: &Pool,
     listing_id: Uuid,
@@ -703,6 +800,71 @@ pub async fn find_buyer_sale_for_listing(
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite interact: {e}")))?
         .map_err(|e| AppError::Internal(anyhow::anyhow!("find buyer sale: {e}")))
+}
+
+pub async fn count_buyer_purchases(pool: &Pool, buyer_wallet: &str) -> AppResult<i64> {
+    let buyer_wallet = buyer_wallet.to_string();
+    pool.get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite conn: {e}")))?
+        .interact(move |conn| -> rusqlite::Result<i64> {
+            conn.query_row(
+                "SELECT COUNT(*) FROM sales WHERE buyer_wallet = ?1",
+                params![buyer_wallet],
+                |row| row.get(0),
+            )
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite interact: {e}")))?
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("count buyer purchases: {e}")))
+}
+
+pub async fn list_buyer_purchases(
+    pool: &Pool,
+    buyer_wallet: &str,
+    limit: i64,
+    offset: i64,
+) -> AppResult<Vec<BuyerPurchaseRow>> {
+    let buyer_wallet = buyer_wallet.to_string();
+    pool.get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite conn: {e}")))?
+        .interact(move |conn| -> rusqlite::Result<Vec<BuyerPurchaseRow>> {
+            let mut stmt = conn.prepare(
+                "SELECT s.id AS sale_id,
+                        s.listing_id,
+                        s.seller_wallet,
+                        s.amount_micro_usdc,
+                        s.tx_signature,
+                        s.settled_at,
+                        l.title AS listing_title,
+                        l.status AS listing_status,
+                        sf.outcome AS feedback_outcome
+                 FROM sales s
+                 JOIN listings l ON l.id = s.listing_id
+                 LEFT JOIN sale_feedback sf ON sf.sale_id = s.id
+                 WHERE s.buyer_wallet = ?1
+                 ORDER BY s.settled_at DESC
+                 LIMIT ?2 OFFSET ?3",
+            )?;
+            let rows = stmt.query_map(params![buyer_wallet, limit, offset], |row| {
+                Ok(BuyerPurchaseRow {
+                    sale_id: parse_uuid(row.get::<_, String>(0)?)?,
+                    listing_id: parse_uuid(row.get::<_, String>(1)?)?,
+                    listing_title: row.get(6)?,
+                    listing_status: row.get(7)?,
+                    seller_wallet: row.get(2)?,
+                    amount_micro_usdc: row.get(3)?,
+                    tx_signature: row.get(4)?,
+                    settled_at: parse_datetime(row.get::<_, String>(5)?)?,
+                    feedback_outcome: row.get(8)?,
+                })
+            })?;
+            rows.collect()
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite interact: {e}")))?
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("list buyer purchases: {e}")))
 }
 
 pub async fn insert_sale_feedback(

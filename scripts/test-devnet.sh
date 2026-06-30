@@ -30,6 +30,7 @@ if [[ "${SKIP_PAID_TESTS:-0}" != "1" ]]; then
     echo "SKIP_PAID_TESTS not set but PAYER_KEYPAIR missing — skipping paid download"
   else
     run_step test-paid-download.sh
+    run_step test-buyer-trust.sh
   fi
 fi
 
