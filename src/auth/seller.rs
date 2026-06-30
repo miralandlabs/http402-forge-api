@@ -13,6 +13,7 @@ const CHALLENGE_PREFIX: &str = "http402-forge:create-listing:v1";
 const DELIST_CHALLENGE_PREFIX: &str = "http402-forge:delist-listing:v1";
 const FEEDBACK_CHALLENGE_PREFIX: &str = "http402-forge:sale-feedback:v1";
 const REDOWNLOAD_CHALLENGE_PREFIX: &str = "http402-forge:redownload:v1";
+const PURCHASE_HISTORY_CHALLENGE_PREFIX: &str = "http402-forge:buyer-purchases:v1";
 const CHALLENGE_TTL: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Clone)]
@@ -113,6 +114,29 @@ impl SellerAuth {
         let expires_at = Utc::now() + chrono::Duration::seconds(CHALLENGE_TTL.as_secs() as i64);
         let message = format!(
             "{REDOWNLOAD_CHALLENGE_PREFIX}\nwallet:{wallet}\nlisting:{listing_id}\nchallenge:{id}\nexpires:{}",
+            expires_at.to_rfc3339()
+        );
+        let stored = StoredChallenge {
+            wallet: wallet.to_string(),
+            message: message.clone(),
+            expires_at,
+        };
+        self.pending
+            .lock()
+            .expect("seller auth lock")
+            .insert(id, stored);
+        Ok((message, expires_at))
+    }
+
+    pub fn issue_purchase_history_challenge(
+        &self,
+        wallet: &str,
+    ) -> AppResult<(String, DateTime<Utc>)> {
+        validate_wallet_pubkey(wallet).map_err(|m| AppError::validation("buyer_wallet", m))?;
+        let id = Uuid::new_v4().to_string();
+        let expires_at = Utc::now() + chrono::Duration::seconds(CHALLENGE_TTL.as_secs() as i64);
+        let message = format!(
+            "{PURCHASE_HISTORY_CHALLENGE_PREFIX}\nwallet:{wallet}\nchallenge:{id}\nexpires:{}",
             expires_at.to_rfc3339()
         );
         let stored = StoredChallenge {

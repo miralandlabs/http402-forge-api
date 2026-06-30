@@ -69,9 +69,16 @@ export FORGE_KEYPAIR=/path/to/keypair.json
 
 forge list --agent-friendly --pretty
 forge buy <listing-uuid> --verify
-forge publish --asset ./file.pdf --title "My PDF" --price 0.05
+forge redownload <listing-uuid>
+forge feedback <sale-uuid> --signal as_described
+forge publish --asset ./file.pdf --title "My PDF" --price 0.05 --display-name "Studio"
 forge vault status
+forge vault activate --send
 ```
+
+**MCP tools (9):** `forge_list`, `forge_preview`, `forge_purchase`, `forge_redownload`, `forge_feedback`, `forge_publish`, `forge_delist`, `forge_vault_status`, `forge_vault_activate`.
+
+**SDK discovery helpers:** `forgePortalManifest()`, `forgeX402Resources()` on `@http402/forge-client`.
 
 **SDK:**
 
@@ -398,7 +405,23 @@ List/detail JSON may include `qualityScore` (0–100 average from outcomes) and 
 
 One feedback row per `sale_id` (**409** on duplicate). Dev bypass: `SKIP_BUYER_AUTH=1`.
 
-TypeScript helpers: `verifyListingContent`, `forgeSaleFeedback`, `forgeBuy({ autoFeedback: true, buyerKeypair, buyerWallet })` in **`@http402/forge-client`** ([npm](https://www.npmjs.com/package/@http402/forge-client)).
+TypeScript helpers: `verifyListingContent`, `forgeSaleFeedback`, `forgeBuy({ autoFeedback: true, buyerKeypair, buyerWallet })`, `forgeBuyerPurchases({ buyerWallet, buyerKeypair })` in **`@http402/forge-client`** ([npm](https://www.npmjs.com/package/@http402/forge-client)).
+
+## Buyer purchase history
+
+```http
+GET /api/v1/buyer/purchases?buyer_wallet={pubkey}&limit=20&offset=0
+```
+
+Requires wallet proof:
+
+1. `GET /api/v1/buyer/purchases-challenge?buyer_wallet={pubkey}`
+2. Sign `message` (prefix `http402-forge:buyer-purchases:v1`).
+3. Call `/buyer/purchases` with base64-encoded UTF-8 headers: `X-Forge-Buyer-Wallet`, `X-Forge-Buyer-Challenge`, `X-Forge-Buyer-Signature`.
+
+Returns `{ items, total }` with camelCase rows: `saleId`, `listingId`, `listingTitle`, `listingStatus`, `sellerWallet`, `amountMicroUsdc`, `settledAt`, optional `feedbackOutcome`.
+
+Human UI: **Purchases** nav → `/forge/purchases` (loads history for connected wallet only).
 
 ## Content moderation (upload)
 

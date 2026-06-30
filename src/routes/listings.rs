@@ -328,14 +328,23 @@ pub async fn download(
         "paid download"
     );
 
-    let sale_row = if payment.already_paid {
-        state
-            .db
-            .find_sale_by_payment(row.id, &payment.payer_wallet, &payment.payment_signature)
-            .await?
-    } else {
-        Some(record_sale(&state, &row, &payment).await?)
-    };
+    let tx_sig = payment
+        .settle_proof
+        .get("transaction")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&payment.payment_signature)
+        .to_string();
+
+    let sale_row = state
+        .db
+        .find_sale_by_payment(row.id, &payment.payer_wallet, &tx_sig)
+        .await?;
+
+    if !payment.already_paid {
+        if let Some(ref sale) = sale_row {
+            let _ = state.sale_events.send(sale.clone());
+        }
+    }
 
     let settle = if payment.settle_proof.is_null() {
         None
@@ -417,6 +426,18 @@ async fn record_sale(
 }
 
 const VAULT_REQUIRED_MSG: &str = "Activate your pr402 SplitVault before publishing.";
+
+/// Reject uploads that would require the escrow lane until Phase 3 ships end-to-end.
+pub(crate) fn ensure_exact_lane_upload(state: &SharedState, asset_bytes: u64) -> AppResult<()> {
+    if asset_bytes >= state.config.escrow_size_threshold {
+        let mb = state.config.escrow_size_threshold as f64 / (1024.0 * 1024.0);
+        return Err(AppError::BadRequest(format!(
+            "escrow lane not enabled yet: assets at or above {:.1} MB are not accepted; compress or split your file",
+            mb
+        )));
+    }
+    Ok(())
+}
 
 pub(crate) async fn require_seller_vault(
     state: &SharedState,
@@ -717,6 +738,8 @@ pub(crate) async fn publish_listing(
 
     require_seller_vault(state, &input.seller_wallet).await?;
 
+    ensure_exact_lane_upload(state, input.asset_data.len() as u64)?;
+
     let preview_for_scan = input.preview_bytes.as_ref().map(|(_, data)| data);
     let preview_ct_for_scan = input.preview_bytes.as_ref().map(|(ct, _)| ct.as_str());
     let moderation = scan_listing_upload(
@@ -772,11 +795,7 @@ pub(crate) async fn publish_listing(
     )
     .await?;
 
-    let delivery_scheme = if input.asset_data.len() as u64 >= state.config.escrow_size_threshold {
-        "escrow"
-    } else {
-        "exact"
-    };
+    let delivery_scheme = "exact";
 
     let row = ListingRow {
         id,
