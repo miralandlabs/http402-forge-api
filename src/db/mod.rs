@@ -151,23 +151,6 @@ impl Database {
         }
     }
 
-    pub async fn insert_payment(
-        &self,
-        key: &str,
-        listing_id: uuid::Uuid,
-        buyer_wallet: &str,
-        tx_signature: &str,
-    ) -> AppResult<()> {
-        match &self.backend {
-            DbBackend::Postgres(pool) => {
-                postgres::insert_payment(pool, key, listing_id, buyer_wallet, tx_signature).await
-            }
-            DbBackend::Sqlite(pool) => {
-                sqlite::insert_payment(pool, key, listing_id, buyer_wallet, tx_signature).await
-            }
-        }
-    }
-
     pub async fn record_payment_and_sale(
         &self,
         idempotency_key: &str,
@@ -194,40 +177,6 @@ impl Database {
                 sqlite::record_payment_and_sale(
                     pool,
                     idempotency_key,
-                    listing_id,
-                    seller_wallet,
-                    buyer_wallet,
-                    amount_micro_usdc,
-                    tx_signature,
-                )
-                .await
-            }
-        }
-    }
-
-    pub async fn insert_sale(
-        &self,
-        listing_id: uuid::Uuid,
-        seller_wallet: &str,
-        buyer_wallet: &str,
-        amount_micro_usdc: i64,
-        tx_signature: &str,
-    ) -> AppResult<SaleRow> {
-        match &self.backend {
-            DbBackend::Postgres(pool) => {
-                postgres::insert_sale(
-                    pool,
-                    listing_id,
-                    seller_wallet,
-                    buyer_wallet,
-                    amount_micro_usdc,
-                    tx_signature,
-                )
-                .await
-            }
-            DbBackend::Sqlite(pool) => {
-                sqlite::insert_sale(
-                    pool,
                     listing_id,
                     seller_wallet,
                     buyer_wallet,

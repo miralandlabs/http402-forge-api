@@ -5,9 +5,9 @@ use deadpool_sqlite::{Config, Hook, HookError, Pool, PoolConfig, Runtime};
 use rusqlite::{params, Row};
 use uuid::Uuid;
 
+use super::sales::BuyerPurchaseRow;
 use super::trust::{ListingQualityStats, SaleFeedbackRow};
 use super::{LeaderboardListingRow, LeaderboardWalletRow, ListingRow, PaymentRow, SaleRow};
-use super::sales::BuyerPurchaseRow;
 use crate::db::listing_filters::{listing_filter_suffix, ListingFilterBinds};
 use crate::error::{AppError, AppResult};
 
@@ -363,36 +363,6 @@ pub async fn find_by_idempotency(pool: &Pool, key: &str) -> AppResult<Option<Pay
         .map_err(|e| AppError::Internal(anyhow::anyhow!("find payment: {e}")))
 }
 
-pub async fn insert_payment(
-    pool: &Pool,
-    key: &str,
-    listing_id: Uuid,
-    buyer_wallet: &str,
-    tx_signature: &str,
-) -> AppResult<()> {
-    let key = key.to_string();
-    let listing_id = listing_id.to_string();
-    let buyer_wallet = buyer_wallet.to_string();
-    let tx_signature = tx_signature.to_string();
-    pool.get()
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite conn: {e}")))?
-        .interact(move |conn| {
-            conn.execute(
-                r#"
-                INSERT INTO payments (idempotency_key, listing_id, buyer_wallet, tx_signature)
-                VALUES (?1, ?2, ?3, ?4)
-                ON CONFLICT (idempotency_key) DO NOTHING
-                "#,
-                params![key, listing_id, buyer_wallet, tx_signature],
-            )
-        })
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite interact: {e}")))?
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("insert payment: {e}")))?;
-    Ok(())
-}
-
 pub async fn record_payment_and_sale(
     pool: &Pool,
     idempotency_key: &str,
@@ -487,51 +457,6 @@ pub async fn record_payment_and_sale(
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite interact: {e}")))?
         .map_err(|e| AppError::Internal(anyhow::anyhow!("record payment and sale: {e}")))
-}
-
-pub async fn insert_sale(
-    pool: &Pool,
-    listing_id: Uuid,
-    seller_wallet: &str,
-    buyer_wallet: &str,
-    amount_micro_usdc: i64,
-    tx_signature: &str,
-) -> AppResult<SaleRow> {
-    let id = Uuid::new_v4();
-    let listing_id_s = listing_id.to_string();
-    let seller_wallet = seller_wallet.to_string();
-    let buyer_wallet = buyer_wallet.to_string();
-    let tx_signature = tx_signature.to_string();
-    let id_s = id.to_string();
-    pool.get()
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite conn: {e}")))?
-        .interact(move |conn| -> rusqlite::Result<SaleRow> {
-            conn.execute(
-                r#"
-                INSERT INTO sales (id, listing_id, seller_wallet, buyer_wallet, amount_micro_usdc, tx_signature)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                "#,
-                params![
-                    id_s,
-                    listing_id_s,
-                    seller_wallet,
-                    buyer_wallet,
-                    amount_micro_usdc,
-                    tx_signature
-                ],
-            )?;
-            let mut stmt = conn.prepare(
-                "SELECT id, listing_id, seller_wallet, buyer_wallet, amount_micro_usdc, tx_signature, settled_at
-                 FROM sales WHERE id = ?1",
-            )?;
-            let mut rows = stmt.query(params![id_s])?;
-            let row = rows.next()?.expect("sale row");
-            map_sale(row)
-        })
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite interact: {e}")))?
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("insert sale: {e}")))
 }
 
 pub async fn top_earners_24h(pool: &Pool, limit: u32) -> AppResult<Vec<LeaderboardWalletRow>> {
@@ -972,4 +897,93 @@ fn map_sale_feedback(row: &Row<'_>) -> rusqlite::Result<SaleFeedbackRow> {
         note: row.get(5)?,
         created_at: parse_datetime(row.get::<_, String>(6)?)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_listing(id: Uuid) -> ListingRow {
+        ListingRow {
+            id,
+            seller_wallet: "SellerWallet111111111111111111111111111111".into(),
+            display_name: None,
+            title: "test".into(),
+            description: String::new(),
+            category: "art".into(),
+            price_micro_usdc: 50_000,
+            preview_key: "p".into(),
+            preview_content_type: "text/plain".into(),
+            asset_key: "a".into(),
+            content_type: "application/octet-stream".into(),
+            byte_size: 1,
+            agent_friendly: false,
+            delivery_scheme: "exact".into(),
+            status: "active".into(),
+            tags: "[]".into(),
+            license: None,
+            content_hash: None,
+            moderation_status: "approved".into(),
+            moderation_labels: "[]".into(),
+            created_at: Utc::now(),
+        }
+    }
+
+    async fn test_pool() -> (Pool, std::path::PathBuf) {
+        let path = std::env::temp_dir().join(format!("forge-test-{}.db", Uuid::new_v4()));
+        let pool = connect_pool(&format!("sqlite:{}", path.display()))
+            .await
+            .expect("pool");
+        migrate(&pool).await.expect("migrate");
+        (pool, path)
+    }
+
+    #[tokio::test]
+    async fn record_payment_and_sale_is_idempotent_under_concurrency() {
+        let (pool, path) = test_pool().await;
+        let listing_id = Uuid::new_v4();
+        insert_listing(&pool, &test_listing(listing_id))
+            .await
+            .expect("insert listing");
+
+        let key = "idem-key-1";
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let pool = pool.clone();
+                tokio::spawn(async move {
+                    record_payment_and_sale(
+                        &pool,
+                        key,
+                        listing_id,
+                        "SellerWallet111111111111111111111111111111",
+                        "BuyerWallet1111111111111111111111111111111",
+                        50_000,
+                        "tx-sig-1",
+                    )
+                    .await
+                })
+            })
+            .collect();
+
+        let mut sale_ids = Vec::new();
+        for h in handles {
+            sale_ids.push(h.await.expect("join").expect("record").id);
+        }
+        assert!(
+            sale_ids.iter().all(|id| *id == sale_ids[0]),
+            "all concurrent calls must return the same sale: {sale_ids:?}"
+        );
+
+        let count: i64 = pool
+            .get()
+            .await
+            .unwrap()
+            .interact(|conn| conn.query_row("SELECT COUNT(*) FROM sales", [], |row| row.get(0)))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(count, 1, "exactly one sale row must exist");
+
+        let _ = std::fs::remove_file(&path);
+    }
 }

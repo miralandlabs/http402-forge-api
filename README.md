@@ -22,7 +22,7 @@ See **[scripts/docker/README.md](scripts/docker/README.md)** for dual-cluster de
 | Preview | `preview.http402.trade` | `preview.forge.http402.trade` |
 | Production | `http402.trade` | `forge.http402.trade` |
 
-CI/CD: `.github/workflows/http402-forge-build-and-deploy.yml` at the monorepo root.
+CI/CD: `.github/workflows/deploy.yml` in this repo (web has its own `deploy.yml` in `http402-forge-web`).
 
 ### Preview generation (upload time)
 

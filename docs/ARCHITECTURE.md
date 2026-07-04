@@ -34,6 +34,10 @@ POST /api/v1/sales/{id}/feedback  (buyer-signed, one per sale)
 
 See [AGENT_API.md](AGENT_API.md) and [openapi.yaml](openapi.yaml).
 
+## Deployment assumptions
+
+The API is designed to run as a **single instance** per environment. Seller/buyer auth challenges, presigned upload sessions, and the IP rate limiter are kept in process memory: a restart invalidates outstanding challenges (clients simply re-request one), and running multiple replicas behind a load balancer would break challenge verification unless sticky sessions are used.
+
 ## Upload moderation
 
 Before R2/DB write on create, optional OpenAI moderation scan (`MODERATION_PROVIDER=openai`) plus `blocked_content_hashes` check. Default `MODERATION_PROVIDER=none` skips provider scan (local dev unchanged).
@@ -53,9 +57,9 @@ GET /api/v1/listings/{id}/download
   → 402 or paid file stream
 ```
 
-## Escrow lane (Phase 2)
+## Escrow lane (Phase 3, not yet enabled)
 
-Listings with `delivery_scheme = escrow` and `byte_size > ESCROW_SIZE_THRESHOLD` use `sla-escrow` accepts (see `routes/listings.rs`). Delivery evidence follows the [x402-buy-spl-token](https://github.com/miralandlabs/x402-buy-spl-token) pattern with file-delivery oracle.
+Uploads at or above `ESCROW_SIZE_THRESHOLD_BYTES` are currently **rejected with HTTP 400** (`ensure_exact_lane_upload` in `routes/listings.rs`); `delivery_scheme` is pinned to `exact` on publish. The `sla-escrow` accepts wiring exists in the gate but stays dormant until the oracle attestation path ships — see [FORGE_PHASE3.md](FORGE_PHASE3.md).
 
 ## Environment
 
@@ -67,7 +71,7 @@ Listings with `delivery_scheme = escrow` and `byte_size > ESCROW_SIZE_THRESHOLD`
 | `SELLER_PUBLIC_BASE_URL` | yes | Public API base for 402 `resource.url` |
 | `FACILITATOR_BASE_URL` | yes | e.g. `https://preview.ipay.sh` |
 | `SOLANA_CLUSTER` | yes | `devnet` or `mainnet` |
-| `STORAGE_BACKEND` | no | `r2` (default) or `local` |
+| `STORAGE_BACKEND` | no | `local` (default) or `r2` |
 | `R2_*` | if r2 | Account, bucket, keys |
 | `LOCAL_STORAGE_PATH` | if local | Default `./data/objects` |
 | `MODERATION_PROVIDER` | no | `none` (default) or `openai` |

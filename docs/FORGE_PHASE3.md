@@ -1,6 +1,6 @@
 # Forge Phase 3 (deferred)
 
-Full escrow lane, platform fees, buyer purchase history, and seller analytics are **intentionally deferred** until the oracle attestation path ships end-to-end.
+Full escrow lane, platform fees, and seller analytics are **intentionally deferred** until the oracle attestation path ships end-to-end. Buyer purchase history has **shipped** (see below).
 
 ## Escrow lane (sla-escrow)
 

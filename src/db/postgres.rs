@@ -9,9 +9,9 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 use uuid::Uuid;
 use webpki_roots::TLS_SERVER_ROOTS;
 
+use super::sales::BuyerPurchaseRow;
 use super::trust::{ListingQualityStats, SaleFeedbackRow};
 use super::{LeaderboardListingRow, LeaderboardWalletRow, ListingRow, PaymentRow, SaleRow};
-use super::sales::BuyerPurchaseRow;
 use crate::db::listing_filters::{listing_filter_suffix, ListingFilterBinds};
 use crate::error::{AppError, AppResult};
 use tokio_postgres::types::ToSql;
@@ -367,31 +367,6 @@ pub async fn find_by_idempotency(pool: &Pool, key: &str) -> AppResult<Option<Pay
     Ok(row.as_ref().map(map_payment))
 }
 
-pub async fn insert_payment(
-    pool: &Pool,
-    key: &str,
-    listing_id: Uuid,
-    buyer_wallet: &str,
-    tx_signature: &str,
-) -> AppResult<()> {
-    let client = pool
-        .get()
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("postgres conn: {e}")))?;
-    client
-        .execute(
-            r#"
-            INSERT INTO payments (idempotency_key, listing_id, buyer_wallet, tx_signature)
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT (idempotency_key) DO NOTHING
-            "#,
-            &[&key, &listing_id, &buyer_wallet, &tx_signature],
-        )
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("insert payment: {e}")))?;
-    Ok(())
-}
-
 pub async fn record_payment_and_sale(
     pool: &Pool,
     idempotency_key: &str,
@@ -432,7 +407,10 @@ pub async fn record_payment_and_sale(
         }
     }
 
-    transaction
+    // The payments PK is the concurrency arbiter: a concurrent transaction with
+    // the same idempotency_key blocks here until the winner commits, then sees
+    // 0 rows affected and returns the winner's sale instead of inserting a second one.
+    let inserted = transaction
         .execute(
             r#"
             INSERT INTO payments (idempotency_key, listing_id, buyer_wallet, tx_signature)
@@ -443,6 +421,29 @@ pub async fn record_payment_and_sale(
         )
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("insert payment: {e}")))?;
+
+    if inserted == 0 {
+        let existing = transaction
+            .query_one(
+                "SELECT buyer_wallet, tx_signature FROM payments WHERE idempotency_key = $1",
+                &[&idempotency_key],
+            )
+            .await
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("payment lookup: {e}")))?;
+        let existing_buyer: String = existing.get(0);
+        let existing_tx: String = existing.get(1);
+        if let Some(sale) =
+            find_sale_by_payment_in_client(&transaction, listing_id, &existing_buyer, &existing_tx)
+                .await?
+        {
+            transaction
+                .commit()
+                .await
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("commit tx: {e}")))?;
+            return Ok(sale);
+        }
+        // Payment row exists without a sale (legacy data) — fall through and record the sale.
+    }
 
     let sale_id = Uuid::new_v4();
     transaction
@@ -495,43 +496,6 @@ async fn find_sale_by_payment_in_client(
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("find sale: {e}")))?;
     Ok(row.as_ref().map(map_sale))
-}
-
-pub async fn insert_sale(
-    pool: &Pool,
-    listing_id: Uuid,
-    seller_wallet: &str,
-    buyer_wallet: &str,
-    amount_micro_usdc: i64,
-    tx_signature: &str,
-) -> AppResult<SaleRow> {
-    let id = Uuid::new_v4();
-    let client = pool
-        .get()
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("postgres conn: {e}")))?;
-    client
-        .execute(
-            r#"
-            INSERT INTO sales (id, listing_id, seller_wallet, buyer_wallet, amount_micro_usdc, tx_signature)
-            VALUES ($1, $2, $3, $4, $5, $6)
-            "#,
-            &[
-                &id,
-                &listing_id,
-                &seller_wallet,
-                &buyer_wallet,
-                &amount_micro_usdc,
-                &tx_signature,
-            ],
-        )
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("insert sale: {e}")))?;
-    let row = client
-        .query_one("SELECT * FROM sales WHERE id = $1", &[&id])
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("fetch sale: {e}")))?;
-    Ok(map_sale(&row))
 }
 
 pub async fn top_earners_24h(pool: &Pool, limit: u32) -> AppResult<Vec<LeaderboardWalletRow>> {

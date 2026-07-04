@@ -21,7 +21,7 @@ Use this checklist before pointing production traffic at `https://forge.http402.
 
 - [ ] Set `ORACLE_AUTHORITIES` to comma-separated oracle signer pubkeys (required for `delivery_scheme=escrow`)
 - [ ] Document oracle profile: `ORACLE_PROFILE_ID=x402/oracles/file-delivery/attestation/v1`
-- [ ] Verify `ESCROW_SIZE_THRESHOLD_BYTES` — assets at or above this size use `sla-escrow` rail automatically
+- [ ] Verify `ESCROW_SIZE_THRESHOLD_BYTES` — uploads at or above this size are currently **rejected** (escrow lane ships in Phase 3)
 - [ ] Test a large-file listing end-to-end: escrow 402 → payment → oracle attestation → download
 
 ## Network & security
