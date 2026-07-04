@@ -11,8 +11,19 @@ on:
 #   FORGE_VPS_REPO_PATH  (default /opt/src/http402-forge-api)
 
 jobs:
+  test:
+    name: cargo test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked
+
   deploy:
     name: API → VPS (Docker)
+    needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:

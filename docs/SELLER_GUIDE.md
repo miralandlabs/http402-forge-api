@@ -59,4 +59,4 @@ Set `SKIP_SELLER_VAULT_CHECK=1` on the API **only** on your machine to skip vaul
 
 ## Large files (escrow lane)
 
-Listings over `ESCROW_SIZE_THRESHOLD_BYTES` (default 10 MB) or with `delivery_scheme=escrow` use the **sla-escrow** rail. Configure oracle authorities on the API host before enabling escrow listings in production.
+Uploads at or above `ESCROW_SIZE_THRESHOLD_BYTES` (default 10 MB) are currently **rejected** — compress or split your file. The **sla-escrow** rail for large files ships in Phase 3 (requires oracle authorities on the API host).

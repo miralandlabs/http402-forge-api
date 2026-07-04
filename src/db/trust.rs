@@ -39,48 +39,5 @@ pub fn validate_feedback_outcome(outcome: &str) -> Result<(), String> {
     }
 }
 
-#[allow(dead_code)]
-pub fn outcome_quality_points(outcome: &str) -> i32 {
-    match outcome {
-        "as_described" => 100,
-        "hash_mismatch" => 0,
-        "corrupt" => 25,
-        "misleading" => 35,
-        "other" => 50,
-        _ => 50,
-    }
-}
-
-#[allow(dead_code)]
-pub fn compute_quality_score(outcomes: &[(String, i64)]) -> ListingQualityStats {
-    if outcomes.is_empty() {
-        return ListingQualityStats::default();
-    }
-    let mut total_weight = 0i64;
-    let mut count = 0i64;
-    for (outcome, n) in outcomes {
-        let points = outcome_quality_points(outcome) as i64;
-        total_weight += points * n;
-        count += n;
-    }
-    if count == 0 {
-        return ListingQualityStats::default();
-    }
-    ListingQualityStats {
-        quality_score: (total_weight / count) as i32,
-        verified_feedback_count: count,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn quality_score_averages_outcomes() {
-        let stats =
-            compute_quality_score(&[("as_described".into(), 1), ("hash_mismatch".into(), 1)]);
-        assert_eq!(stats.quality_score, 50);
-        assert_eq!(stats.verified_feedback_count, 2);
-    }
-}
+// Quality scoring (outcome → points, averaged per listing) lives in SQL:
+// see the CASE expressions in sqlite.rs / postgres.rs listing quality stats queries.

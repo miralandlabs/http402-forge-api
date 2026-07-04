@@ -23,7 +23,7 @@ use crate::preview::{
 };
 use crate::state::SharedState;
 use crate::storage::{object_key, serve_object, DeliveryQuery, ObjectServeOptions, ObjectStore};
-use crate::x402::{PaymentContext, PaymentGate};
+use crate::x402::PaymentGate;
 
 #[derive(Debug, Deserialize)]
 pub struct ListQuery {
@@ -398,31 +398,6 @@ pub async fn delist(
         return Err(AppError::NotFound);
     }
     Ok(StatusCode::NO_CONTENT)
-}
-
-async fn record_sale(
-    state: &SharedState,
-    listing: &ListingRow,
-    payment: &PaymentContext,
-) -> AppResult<crate::db::SaleRow> {
-    let tx = payment
-        .settle_proof
-        .get("transaction")
-        .and_then(|v| v.as_str())
-        .unwrap_or(&payment.payment_signature)
-        .to_string();
-    let sale = state
-        .db
-        .insert_sale(
-            listing.id,
-            &listing.seller_wallet,
-            &payment.payer_wallet,
-            listing.price_micro_usdc,
-            &tx,
-        )
-        .await?;
-    let _ = state.sale_events.send(sale.clone());
-    Ok(sale)
 }
 
 const VAULT_REQUIRED_MSG: &str = "Activate your pr402 SplitVault before publishing.";
