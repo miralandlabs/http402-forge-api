@@ -3,6 +3,13 @@ pub const SOLANA_DEVNET_NETWORK: &str = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1
 pub const DEFAULT_SCHEME_EXACT: &str = "v2:solana:exact";
 pub const DEFAULT_SCHEME_ESCROW: &str = "sla-escrow";
 
+/// Default max paid asset upload (100 MiB). Override with `MAX_ASSET_BYTES`.
+pub const DEFAULT_MAX_ASSET_BYTES: u64 = 104_857_600;
+/// Default max preview upload (10 MiB). Override with `MAX_PREVIEW_BYTES`.
+pub const DEFAULT_MAX_PREVIEW_BYTES: u64 = 10_485_760;
+/// Default exact-lane ceiling / escrow lane floor (100 MiB). Override with `ESCROW_SIZE_THRESHOLD_BYTES`.
+pub const DEFAULT_ESCROW_SIZE_THRESHOLD_BYTES: u64 = 104_857_600;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SolanaCluster {
     Mainnet,
@@ -196,14 +203,17 @@ impl AppConfig {
             r2_bucket: std::env::var("R2_BUCKET").ok(),
             r2_access_key_id: std::env::var("R2_ACCESS_KEY_ID").ok(),
             r2_secret_access_key: std::env::var("R2_SECRET_ACCESS_KEY").ok(),
-            max_asset_bytes: env_u64("MAX_ASSET_BYTES", 52_428_800),
-            max_preview_bytes: env_u64("MAX_PREVIEW_BYTES", 5_242_880),
+            max_asset_bytes: env_u64("MAX_ASSET_BYTES", DEFAULT_MAX_ASSET_BYTES),
+            max_preview_bytes: env_u64("MAX_PREVIEW_BYTES", DEFAULT_MAX_PREVIEW_BYTES),
             preview_media_seconds: env_u32("PREVIEW_MEDIA_SECONDS", 30),
             ffmpeg_bin: std::env::var("FFMPEG_BIN").unwrap_or_else(|_| "ffmpeg".into()),
             pdftoppm_bin: std::env::var("PDFTOPPM_BIN").unwrap_or_else(|_| "pdftoppm".into()),
             gs_bin: std::env::var("GS_BIN").unwrap_or_else(|_| "gs".into()),
             mutool_bin: std::env::var("MUTOOL_BIN").unwrap_or_else(|_| "mutool".into()),
-            escrow_size_threshold: env_u64("ESCROW_SIZE_THRESHOLD_BYTES", 10_485_760),
+            escrow_size_threshold: env_u64(
+                "ESCROW_SIZE_THRESHOLD_BYTES",
+                DEFAULT_ESCROW_SIZE_THRESHOLD_BYTES,
+            ),
             platform_fee_bps: env_u16("PLATFORM_FEE_BPS", 0),
             platform_fee_wallet: std::env::var("PLATFORM_FEE_WALLET")
                 .ok()
