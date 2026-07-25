@@ -315,6 +315,22 @@ pub async fn download(
     let path = format!("/api/v1/listings/{id}/download");
     let payment = PaymentGate::check_download_active_or_paid(&state, &headers, &row, &path).await?;
 
+    let Some(payment) = payment else {
+        tracing::info!(
+            listing_id = %id,
+            bytes = row.byte_size,
+            "free download"
+        );
+        return build_asset_download_response(
+            &state,
+            &row,
+            None,
+            None,
+            delivery_q.format(&state.config)?,
+        )
+        .await;
+    };
+
     let mode = if payment.already_paid {
         "retry_same_payment_proof"
     } else {
@@ -429,6 +445,31 @@ pub(crate) async fn require_seller_vault(
     Ok(())
 }
 
+/// Early multipart vault gate: skip when price is free; defer when price unknown; enforce when paid.
+/// Returns whether the vault decision is settled (`vault_checked`).
+async fn maybe_require_seller_vault_for_price(
+    state: &SharedState,
+    seller_wallet: &str,
+    price_usdc: &str,
+    vault_checked: bool,
+) -> AppResult<bool> {
+    if vault_checked || state.config.skip_seller_vault_check {
+        return Ok(true);
+    }
+    if price_usdc.trim().is_empty() {
+        return Ok(false);
+    }
+    match parse_price_usdc(price_usdc) {
+        Ok(0) => Ok(true),
+        Ok(_) => {
+            require_seller_vault(state, seller_wallet).await?;
+            Ok(true)
+        }
+        // Invalid price: defer — publish_listing will reject with a validation error.
+        Err(_) => Ok(false),
+    }
+}
+
 fn sanitize_filename(title: &str) -> String {
     title
         .chars()
@@ -526,8 +567,13 @@ pub async fn create(
         if (name == "asset" || name == "preview") && !vault_checked {
             validate_wallet(&seller_wallet)
                 .map_err(|m| AppError::validation("seller_wallet", m))?;
-            require_seller_vault(&state, &seller_wallet).await?;
-            vault_checked = true;
+            vault_checked = maybe_require_seller_vault_for_price(
+                &state,
+                &seller_wallet,
+                &price_usdc,
+                vault_checked,
+            )
+            .await?;
         }
         match name.as_str() {
             "seller_wallet" => seller_wallet = field.text().await.unwrap_or_default(),
@@ -598,8 +644,22 @@ pub async fn create(
         if name == "seller_wallet" && !seller_wallet.trim().is_empty() && !vault_checked {
             validate_wallet(&seller_wallet)
                 .map_err(|m| AppError::validation("seller_wallet", m))?;
-            require_seller_vault(&state, &seller_wallet).await?;
-            vault_checked = true;
+            vault_checked = maybe_require_seller_vault_for_price(
+                &state,
+                &seller_wallet,
+                &price_usdc,
+                vault_checked,
+            )
+            .await?;
+        }
+        if name == "price_usdc" && !seller_wallet.trim().is_empty() && !vault_checked {
+            vault_checked = maybe_require_seller_vault_for_price(
+                &state,
+                &seller_wallet,
+                &price_usdc,
+                vault_checked,
+            )
+            .await?;
         }
     }
 
@@ -615,9 +675,7 @@ pub async fn create(
         )?;
     }
 
-    if !vault_checked {
-        require_seller_vault(&state, &seller_wallet).await?;
-    }
+    // Final vault decision is in publish_listing (paid only). Early checks above are best-effort.
 
     let id = Uuid::new_v4();
     let asset_key = object_key("assets", id, "asset");
@@ -711,7 +769,10 @@ pub(crate) async fn publish_listing(
         ));
     }
 
-    require_seller_vault(state, &input.seller_wallet).await?;
+    // Free listings (price 0) skip SplitVault — no payTo / settle.
+    if price_micro > 0 && !state.config.skip_seller_vault_check {
+        require_seller_vault(state, &input.seller_wallet).await?;
+    }
 
     ensure_exact_lane_upload(state, input.asset_data.len() as u64)?;
 

@@ -5,9 +5,7 @@ use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
 use crate::models::validate_wallet;
-use crate::routes::listings::{
-    ensure_exact_lane_upload, publish_listing, require_seller_vault, PublishListingInput,
-};
+use crate::routes::listings::{ensure_exact_lane_upload, publish_listing, PublishListingInput};
 use crate::state::SharedState;
 use crate::storage::{object_key, supports_presigned_upload, ObjectStore, PresignedPut};
 
@@ -89,7 +87,7 @@ pub async fn upload_session(
             &body.seller_signature,
         )?;
     }
-    require_seller_vault(&state, &body.seller_wallet).await?;
+    // Vault is enforced in publish_listing when price_usdc > 0 (price unknown at session start).
 
     let listing_id = Uuid::new_v4();
     let ttl = state.config.presign_ttl_secs;
