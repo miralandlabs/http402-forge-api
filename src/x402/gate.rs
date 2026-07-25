@@ -22,12 +22,19 @@ pub struct PaymentContext {
 pub struct PaymentGate;
 
 impl PaymentGate {
+    /// Returns `Ok(None)` when the listing is free (`price_micro_usdc == 0`):
+    /// no vault resolve, 402, verify, or settle — same pattern as
+    /// spl-token-balance-serverless `payment_skipped`.
     pub async fn check_download(
         state: &AppState,
         headers: &HeaderMap,
         listing: &ListingRow,
         canonical_path: &str,
-    ) -> AppResult<PaymentContext> {
+    ) -> AppResult<Option<PaymentContext>> {
+        if listing.price_micro_usdc == 0 {
+            return Ok(None);
+        }
+
         let use_escrow = listing_uses_escrow(
             &listing.delivery_scheme,
             listing.byte_size,
@@ -133,12 +140,12 @@ impl PaymentGate {
 
         let idem = idempotency_key(&sig, canonical_path);
         if let Some(existing) = state.db.find_by_idempotency(&idem).await? {
-            return Ok(PaymentContext {
+            return Ok(Some(PaymentContext {
                 payer_wallet: existing.buyer_wallet,
                 payment_signature: existing.tx_signature,
                 settle_proof: json!({}),
                 already_paid: true,
-            });
+            }));
         }
 
         let settle = state
@@ -176,12 +183,12 @@ impl PaymentGate {
             )
             .await?;
 
-        Ok(PaymentContext {
+        Ok(Some(PaymentContext {
             payer_wallet: payer,
             payment_signature: sig,
             settle_proof: settle,
             already_paid: false,
-        })
+        }))
     }
 
     pub async fn check_download_active_or_paid(
@@ -189,11 +196,17 @@ impl PaymentGate {
         headers: &HeaderMap,
         listing: &ListingRow,
         canonical_path: &str,
-    ) -> AppResult<PaymentContext> {
+    ) -> AppResult<Option<PaymentContext>> {
         if listing.status == "active" {
             return Self::check_download(state, headers, listing, canonical_path).await;
         }
-        Self::check_delisted_redownload(state, headers, canonical_path).await
+        // Free listings never record a sale; delisted free assets are not recoverable via payment proof.
+        if listing.price_micro_usdc == 0 {
+            return Err(AppError::NotFound);
+        }
+        Ok(Some(
+            Self::check_delisted_redownload(state, headers, canonical_path).await?,
+        ))
     }
 
     async fn check_delisted_redownload(

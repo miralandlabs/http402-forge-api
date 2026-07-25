@@ -129,12 +129,16 @@ pub fn parse_price_usdc(raw: &str) -> Result<i64, String> {
         .trim()
         .parse()
         .map_err(|_| "price_usdc must be a decimal number".to_string())?;
-    if v <= 0.0 || v > 1000.0 {
+    if v < 0.0 || v > 1000.0 {
         return Err("price_usdc must be between 0 and 1000 USDC".into());
+    }
+    // Free downloads: exactly 0 only (do not treat dust that rounds to 0µ as free).
+    if v == 0.0 {
+        return Ok(0);
     }
     let micro = (v * 1_000_000.0).round() as i64;
     if micro < 10_000 {
-        return Err("minimum price is 0.01 USDC".into());
+        return Err("minimum paid price is 0.01 USDC (use 0 for free)".into());
     }
     Ok(micro)
 }
@@ -253,5 +257,25 @@ mod tests {
         let snippet = text_preview_snippet(&text, 10);
         assert!(snippet.ends_with('…'));
         assert_eq!(snippet.chars().count(), 11);
+    }
+
+    #[test]
+    fn parse_price_usdc_allows_free_zero() {
+        assert_eq!(parse_price_usdc("0").unwrap(), 0);
+        assert_eq!(parse_price_usdc("0.0").unwrap(), 0);
+        assert_eq!(parse_price_usdc(" 0 ").unwrap(), 0);
+    }
+
+    #[test]
+    fn parse_price_usdc_rejects_below_paid_minimum() {
+        assert!(parse_price_usdc("0.005").is_err());
+        assert!(parse_price_usdc("0.0000001").is_err());
+        assert!(parse_price_usdc("-1").is_err());
+    }
+
+    #[test]
+    fn parse_price_usdc_accepts_paid_minimum() {
+        assert_eq!(parse_price_usdc("0.01").unwrap(), 10_000);
+        assert_eq!(parse_price_usdc("0.05").unwrap(), 50_000);
     }
 }
