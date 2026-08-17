@@ -4,6 +4,8 @@ Full escrow lane, platform fees, and seller analytics are **intentionally deferr
 
 ## Escrow lane (sla-escrow)
 
+Design: **[ESCROW_TWO_DOORS.md](./ESCROW_TWO_DOORS.md)** — one Forge object, payment door vs verdict door; oracles do not host buyer downloads.
+
 - Oracle authorities configured on `http402-forge-api`
 - Web wallet flow for `sla-escrow` **or** CLI-only path documented
 - Remove upload rejection above `escrow_size_threshold` when oracle settlement is live
