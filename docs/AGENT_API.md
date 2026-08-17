@@ -324,6 +324,48 @@ GET /api/v1/listings/{id}/download
 
 Idempotency: same payment signature returns the file without double-charging (checked via `payments` table). Works for both active and removed listings.
 
+## Immutable object keys
+
+Every listing asset is stored under a **content-addressed key**: `assets/{sha256_hex}` where `sha256_hex` is the lowercase SHA-256 of the asset bytes (`listing.contentHash`). Overwriting an existing key is rejected, so a seller can never swap bytes after publish — the payment door and the oracle verdict door always stream the same immutable object.
+
+## Oracle verdict door (escrow)
+
+For sla-escrow listings, the named oracle authority streams the same stored object for verification without a 402 and without recording a sale:
+
+```http
+GET {FORGE_API}/api/v1/oracle/listings/{listing_id}/artifact
+X-Forge-Payment-Uid: {hex-64 payment uid}
+X-Forge-Oracle-Ts: {unix seconds}
+X-Forge-Oracle-Sig: {base58 ed25519 signature}
+```
+
+The signature is over the UTF-8 message
+`forge-oracle-v1|{listing_id}|{payment_uid_hex}|{ts}|{host}`, where `host` is the Forge API public host (e.g. `preview.forge.http402.trade`). The API accepts the request only when:
+
+1. The listing exists and its `deliveryScheme` is `escrow` (exact-rail listings never open this door);
+2. An escrow fund bind row exists for `(listing_id, payment_uid)`;
+3. `ts` is within ±60s of server time;
+4. The signature verifies against the bind's `oracle_authority`;
+5. The listing's `contentHash` matches the bind's `content_hash`.
+
+Otherwise it returns **403**. The response body is the raw object stream with no `X-Forge-Sale-Id` and no `PAYMENT-RESPONSE`.
+
+**Escrow fund binds** are recorded by the facilitator after a successful sla-escrow `FundPayment`:
+
+```http
+POST {FORGE_API}/api/v1/oracle/escrow-binds
+Content-Type: application/json
+
+{
+  "listingId": "{uuid}",
+  "paymentUid": "{hex-64 payment uid}",
+  "contentHash": "{optional; must match listing}",
+  "oracleAuthority": "{on-chain base58 oracle authority}"
+}
+```
+
+The listing must be `escrow`-scheme and `oracleAuthority` must be a listed `ORACLE_AUTHORITIES` operator. `contentHash` is copied from the immutable listing row.
+
 ## Preview
 
 ```http

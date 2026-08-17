@@ -62,3 +62,28 @@ pub fn extract_payment_header_value(get_header: impl Fn(&str) -> Option<String>)
 pub fn encode_payment_response(settle_result: &Value) -> String {
     B64.encode(settle_result.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn payment_door_ignores_oracle_headers() {
+        // The payment door only reads `payment-signature`. Oracle verdict
+        // headers must never be treated as a payment proof.
+        let get = |name: &str| -> Option<String> {
+            match name.to_ascii_lowercase().as_str() {
+                "x-forge-oracle-sig" => {
+                    Some("2k1F6zWm3h9VgQnT8pRxY5sEaBcDeFgHiJkLmNoPqRsTuVwXyZaAbCdEfGhIjKlM".into())
+                }
+                "x-forge-payment-uid" => Some("ab".repeat(32)),
+                "x-forge-oracle-ts" => Some("1723843200".into()),
+                _ => None,
+            }
+        };
+        assert!(
+            extract_payment_header_value(get).is_none(),
+            "oracle headers must not satisfy the payment door"
+        );
+    }
+}

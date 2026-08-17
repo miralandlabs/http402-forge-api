@@ -159,6 +159,23 @@ components:
       properties:
         error: { type: string }
         message: { type: string }
+    EscrowFundBindRequest:
+      type: object
+      required: [listingId, paymentUid, oracleAuthority]
+      description: |
+        Facilitator report of a successful sla-escrow FundPayment. The API records
+        an escrow fund bind row so the named oracle may open the verdict door.
+      properties:
+        listingId: { type: string, format: uuid }
+        paymentUid:
+          type: string
+          description: Lowercase hex-64 payment uid (32 bytes) pinned by FundPayment
+        contentHash:
+          type: string
+          description: Optional; if sent must equal the listing's immutable SHA-256 hex
+        oracleAuthority:
+          type: string
+          description: On-chain oracle_authority of the funded payment (base58 ed25519 pubkey)
 paths:
   /health:
     get:
@@ -710,6 +727,75 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ValidationError" }
+  /api/v1/oracle/listings/{listing_id}/artifact:
+    get:
+      summary: Oracle verdict door — stream a funded escrow listing artifact
+      description: |
+        Streams the immutable stored object for a funded sla-escrow payment
+        without a 402 and without recording a sale. Requires the named oracle
+        authority's Ed25519 signature over
+        `forge-oracle-v1|{listing_id}|{payment_uid_hex}|{ts}|{host}`
+        (`host` is the Forge API public host, e.g. preview.forge.http402.trade).
+        Exact-rail listings never open this door.
+      parameters:
+        - in: path
+          name: listing_id
+          required: true
+          schema: { type: string, format: uuid }
+        - in: header
+          name: X-Forge-Payment-Uid
+          required: true
+          schema: { type: string }
+          description: Lowercase hex-64 payment uid bound to this listing
+        - in: header
+          name: X-Forge-Oracle-Ts
+          required: true
+          schema: { type: integer }
+          description: Unix seconds; must be within ±60s of server time
+        - in: header
+          name: X-Forge-Oracle-Sig
+          required: true
+          schema: { type: string }
+          description: Base58 Ed25519 signature of the message
+      responses:
+        "200":
+          description: Asset stream (proxy; no X-Forge-Sale-Id and no PAYMENT-RESPONSE)
+        "403":
+          description: Missing/invalid signature, stale timestamp, not an escrow listing, no bind, or hash mismatch
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorBody" }
+        "404":
+          description: Listing not found or stored object missing
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorBody" }
+  /api/v1/oracle/escrow-binds:
+    post:
+      summary: Record an escrow fund bind (facilitator)
+      description: |
+        Records a bind row when a sla-escrow payment is funded. The listing must
+        use the escrow delivery scheme and the oracleAuthority must be a listed
+        ORACLE_AUTHORITIES operator. contentHash is taken from the immutable
+        listing row (sent value, if present, must match).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EscrowFundBindRequest" }
+      responses:
+        "201":
+          description: Bind recorded (idempotent per listingId + paymentUid)
+        "403":
+          description: Not an escrow listing, hash mismatch, or oracleAuthority not listed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorBody" }
+        "404":
+          description: Listing not found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorBody" }
   /api/v1/leaderboards:
     get:
       summary: 24h leaderboard aggregates

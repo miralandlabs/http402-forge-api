@@ -54,6 +54,15 @@ impl ObjectStore for LocalStorage {
         Ok(())
     }
 
+    async fn put_if_absent(&self, key: &str, content_type: &str, data: Bytes) -> AppResult<()> {
+        if self.path_for(key).exists() {
+            return Err(AppError::Conflict(format!(
+                "object key already exists: {key}"
+            )));
+        }
+        self.put(key, content_type, data).await
+    }
+
     async fn get(&self, key: &str) -> AppResult<(Bytes, String)> {
         let path = self.path_for(key);
         if !path.exists() {
@@ -113,5 +122,29 @@ impl ObjectStore for LocalStorage {
         Err(AppError::Storage(
             "presigned PUT requires STORAGE_BACKEND=r2".into(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+
+    #[tokio::test]
+    async fn put_if_absent_rejects_existing_key() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = LocalStorage::new(tmp.path().to_path_buf()).expect("store");
+        store
+            .put_if_absent("assets/hash", "text/plain", Bytes::from_static(b"first"))
+            .await
+            .expect("first put");
+        let err = store
+            .put_if_absent("assets/hash", "text/plain", Bytes::from_static(b"second"))
+            .await
+            .expect_err("overwrite must fail");
+        assert!(matches!(err, AppError::Conflict(_)));
+        // The original bytes are still intact.
+        let (data, _) = store.get("assets/hash").await.expect("get");
+        assert_eq!(data.as_ref(), b"first");
     }
 }

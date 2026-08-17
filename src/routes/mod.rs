@@ -5,6 +5,7 @@ mod health;
 mod leaderboards;
 mod listings;
 mod listings_upload;
+mod oracle;
 mod rate_limit;
 mod sale_feedback;
 mod seller;
@@ -79,6 +80,10 @@ pub fn router(state: SharedState) -> Router {
             "/api/v1/listings/{id}/redownload",
             get(buyer_redownload::redownload),
         )
+        .route(
+            "/api/v1/oracle/listings/{listing_id}/artifact",
+            get(oracle::artifact),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             rate_limit_middleware,
@@ -119,6 +124,10 @@ pub fn router(state: SharedState) -> Router {
         .route(
             "/api/v1/sales/{id}/feedback",
             post(sale_feedback::submit_feedback),
+        )
+        .route(
+            "/api/v1/oracle/escrow-binds",
+            post(oracle::record_fund_bind),
         )
         .route("/api/v1/events", get(events::sse))
         .route(

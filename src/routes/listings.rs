@@ -22,7 +22,9 @@ use crate::preview::{
     is_pdf_content_type,
 };
 use crate::state::SharedState;
-use crate::storage::{object_key, serve_object, DeliveryQuery, ObjectServeOptions, ObjectStore};
+use crate::storage::{
+    asset_object_key, object_key, serve_object, DeliveryQuery, ObjectServeOptions, ObjectStore,
+};
 use crate::x402::PaymentGate;
 
 #[derive(Debug, Deserialize)]
@@ -678,12 +680,6 @@ pub async fn create(
     // Final vault decision is in publish_listing (paid only). Early checks above are best-effort.
 
     let id = Uuid::new_v4();
-    let asset_key = object_key("assets", id, "asset");
-    state
-        .storage
-        .put(&asset_key, &asset_ct, asset_data.clone())
-        .await?;
-
     let row = publish_listing(
         &state,
         PublishListingInput {
@@ -702,8 +698,6 @@ pub async fn create(
             preview_bytes,
         },
         id,
-        asset_key,
-        true,
     )
     .await?;
 
@@ -736,8 +730,6 @@ pub(crate) async fn publish_listing(
     state: &SharedState,
     input: PublishListingInput,
     id: Uuid,
-    asset_key: String,
-    asset_already_stored: bool,
 ) -> AppResult<ListingRow> {
     validate_wallet(&input.seller_wallet).map_err(|m| AppError::validation("seller_wallet", m))?;
     validate_category(&input.category).map_err(|m| AppError::validation("category", m))?;
@@ -815,12 +807,13 @@ pub(crate) async fn publish_listing(
         )));
     }
 
-    if !asset_already_stored {
-        state
-            .storage
-            .put(&asset_key, &input.asset_ct, input.asset_data.clone())
-            .await?;
-    }
+    // Store the asset under its immutable, content-addressed key. Re-uploading
+    // identical bytes (or any collision) is rejected instead of overwriting.
+    let asset_key = asset_object_key(&computed_hash);
+    state
+        .storage
+        .put_if_absent(&asset_key, &input.asset_ct, input.asset_data.clone())
+        .await?;
 
     let (preview_key, preview_content_type) = store_listing_preview(
         state,
@@ -994,4 +987,109 @@ async fn store_uploaded_preview(
 fn sha256_hex(data: &Bytes) -> String {
     use sha2::{Digest, Sha256};
     format!("{:x}", Sha256::digest(data))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{
+        AppConfig, ClusterConfig, ModerationConfig, ModerationProvider, ObjectDelivery,
+        SolanaCluster, StorageBackend,
+    };
+    use crate::db::Database;
+    use crate::state::AppState;
+    use crate::storage::{asset_object_key, ObjectStore};
+    use std::sync::Arc;
+
+    async fn build_state(tmp: &std::path::Path) -> SharedState {
+        let config = AppConfig {
+            cluster: SolanaCluster::Devnet,
+            bind_addr: "127.0.0.1:8092".parse().unwrap(),
+            seller_public_base_url: "http://127.0.0.1:8092".into(),
+            database_url: format!("sqlite:{}", tmp.join("forge.db").display()),
+            facilitator_base_url: "https://preview.ipay.sh".into(),
+            facilitator_timeout_secs: 15,
+            payment_timeout_secs: 300,
+            storage_backend: StorageBackend::Local,
+            local_storage_path: tmp.join("objects"),
+            r2_account_id: None,
+            r2_bucket: None,
+            r2_access_key_id: None,
+            r2_secret_access_key: None,
+            max_asset_bytes: crate::config::DEFAULT_MAX_ASSET_BYTES,
+            max_preview_bytes: crate::config::DEFAULT_MAX_PREVIEW_BYTES,
+            preview_media_seconds: 30,
+            ffmpeg_bin: "ffmpeg".into(),
+            pdftoppm_bin: "pdftoppm".into(),
+            gs_bin: "gs".into(),
+            mutool_bin: "mutool".into(),
+            escrow_size_threshold: crate::config::DEFAULT_ESCROW_SIZE_THRESHOLD_BYTES,
+            platform_fee_bps: 0,
+            platform_fee_wallet: None,
+            oracle_authorities: vec![],
+            oracle_profile_id: "x402/oracles/file-delivery/attestation/v1".into(),
+            skip_seller_vault_check: true,
+            skip_seller_auth: true,
+            skip_buyer_auth: true,
+            moderation: ModerationConfig {
+                provider: ModerationProvider::None,
+                openai_api_key: None,
+                fail_closed: false,
+            },
+            cors_allowed_origins: vec![],
+            object_delivery: ObjectDelivery::Proxy,
+            presign_ttl_secs: 300,
+            version: "0.1.0".into(),
+            leaderboard_limit: 5,
+        };
+        let cluster = ClusterConfig::for_cluster(config.cluster);
+        let db = Database::connect(&config.database_url)
+            .await
+            .expect("connect db");
+        Arc::new(
+            AppState::build(config, cluster, db)
+                .await
+                .expect("build state"),
+        )
+    }
+
+    #[tokio::test]
+    async fn publish_rejects_existing_immutable_object_key() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = build_state(tmp.path()).await;
+
+        let asset = Bytes::from_static(b"immutable asset bytes");
+        let computed_hash = sha256_hex(&asset);
+        let asset_key = asset_object_key(&computed_hash);
+
+        // Simulate a prior identical upload occupying the content-addressed key.
+        state
+            .storage
+            .put(&asset_key, "text/plain", asset.clone())
+            .await
+            .expect("seed object");
+
+        let err = publish_listing(
+            &state,
+            PublishListingInput {
+                seller_wallet: "SellerWallet111111111111111111111111111111".into(),
+                display_name: None,
+                title: "immutable".into(),
+                description: String::new(),
+                category: "text".into(),
+                price_usdc: "0".into(),
+                agent_friendly: false,
+                tags_raw: String::new(),
+                license: None,
+                content_hash: None,
+                asset_ct: "text/plain".into(),
+                asset_data: asset,
+                preview_bytes: None,
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .expect_err("overwrite must be rejected");
+        assert!(matches!(err, AppError::Conflict(_)));
+    }
 }
