@@ -5,6 +5,7 @@ mod health;
 mod leaderboards;
 mod listings;
 mod listings_upload;
+mod oracle;
 mod rate_limit;
 mod sale_feedback;
 mod seller;
@@ -42,6 +43,9 @@ fn cors_layer(origins: &[String]) -> CorsLayer {
             axum::http::HeaderName::from_static("x-forge-buyer-wallet"),
             axum::http::HeaderName::from_static("x-forge-buyer-challenge"),
             axum::http::HeaderName::from_static("x-forge-buyer-signature"),
+            axum::http::HeaderName::from_static("x-forge-payment-uid"),
+            axum::http::HeaderName::from_static("x-forge-oracle-ts"),
+            axum::http::HeaderName::from_static("x-forge-oracle-sig"),
         ]))
         .expose_headers(ExposeHeaders::list([
             axum::http::HeaderName::from_static("x-forge-sale-id"),
@@ -75,6 +79,10 @@ pub fn router(state: SharedState) -> Router {
             get(listings::preview_pdf),
         )
         .route("/api/v1/listings/{id}/download", get(listings::download))
+        .route(
+            "/api/v1/oracle/listings/{id}/artifact",
+            get(oracle::artifact),
+        )
         .route(
             "/api/v1/listings/{id}/redownload",
             get(buyer_redownload::redownload),

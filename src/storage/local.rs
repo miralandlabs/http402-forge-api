@@ -115,3 +115,30 @@ impl ObjectStore for LocalStorage {
         ))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::ObjectStore;
+    use bytes::Bytes;
+
+    #[tokio::test]
+    async fn put_if_absent_rejects_existing_object_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalStorage::new(dir.path().to_path_buf()).unwrap();
+        store
+            .put("assets/abc", "text/plain", Bytes::from_static(b"one"))
+            .await
+            .unwrap();
+        let err = store
+            .put_if_absent("assets/abc", "text/plain", Bytes::from_static(b"two"))
+            .await
+            .unwrap_err();
+        match err {
+            AppError::Conflict(msg) => assert!(msg.contains("already exists")),
+            other => panic!("expected conflict, got {other:?}"),
+        }
+        let (data, _) = store.get("assets/abc").await.unwrap();
+        assert_eq!(&data[..], b"one");
+    }
+}

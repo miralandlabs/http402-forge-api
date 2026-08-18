@@ -39,6 +39,10 @@ impl Facilitator {
         })
     }
 
+    pub async fn verify(&self, body: &Value) -> Result<Value, FacilitatorExtError> {
+        self.client.verify(body).await.map_err(Into::into)
+    }
+
     pub async fn verify_and_settle(&self, body: &Value) -> Result<Value, FacilitatorExtError> {
         self.client
             .verify_and_settle(body)

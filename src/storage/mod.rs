@@ -42,6 +42,23 @@ pub trait ObjectStore: Send + Sync {
         content_type: &str,
         ttl_secs: u32,
     ) -> AppResult<PresignedPut>;
+
+    async fn exists(&self, key: &str) -> AppResult<bool> {
+        match self.head(key).await {
+            Ok(_) => Ok(true),
+            Err(crate::error::AppError::NotFound) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn put_if_absent(&self, key: &str, content_type: &str, data: Bytes) -> AppResult<()> {
+        if self.exists(key).await? {
+            return Err(crate::error::AppError::Conflict(format!(
+                "object key already exists: {key}"
+            )));
+        }
+        self.put(key, content_type, data).await
+    }
 }
 
 pub enum Storage {
@@ -104,6 +121,20 @@ impl ObjectStore for Storage {
             Self::R2(s) => s.presign_put(key, content_type, ttl_secs).await,
         }
     }
+
+    async fn exists(&self, key: &str) -> AppResult<bool> {
+        match self {
+            Self::Local(s) => s.exists(key).await,
+            Self::R2(s) => s.exists(key).await,
+        }
+    }
+
+    async fn put_if_absent(&self, key: &str, content_type: &str, data: Bytes) -> AppResult<()> {
+        match self {
+            Self::Local(s) => s.put_if_absent(key, content_type, data).await,
+            Self::R2(s) => s.put_if_absent(key, content_type, data).await,
+        }
+    }
 }
 
 impl Storage {
@@ -119,6 +150,15 @@ impl Storage {
             }
         }
     }
+}
+
+pub fn content_hash_hex(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(data))
+}
+
+pub fn content_object_key(content_hash: &str) -> String {
+    format!("assets/{content_hash}")
 }
 
 pub fn object_key(prefix: &str, id: uuid::Uuid, filename: &str) -> String {

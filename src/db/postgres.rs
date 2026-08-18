@@ -11,7 +11,9 @@ use webpki_roots::TLS_SERVER_ROOTS;
 
 use super::sales::BuyerPurchaseRow;
 use super::trust::{ListingQualityStats, SaleFeedbackRow};
-use super::{LeaderboardListingRow, LeaderboardWalletRow, ListingRow, PaymentRow, SaleRow};
+use super::{
+    EscrowFundBind, LeaderboardListingRow, LeaderboardWalletRow, ListingRow, PaymentRow, SaleRow,
+};
 use crate::db::listing_filters::{listing_filter_suffix, ListingFilterBinds};
 use crate::error::{AppError, AppResult};
 use tokio_postgres::types::ToSql;
@@ -20,6 +22,7 @@ const SCHEMA: &str = include_str!("../../migrations/postgres/001_init.sql");
 const SCHEMA_002: &str = include_str!("../../migrations/postgres/002_agent_metadata.sql");
 const SCHEMA_003: &str = include_str!("../../migrations/postgres/003_preview_content_type.sql");
 const SCHEMA_004: &str = include_str!("../../migrations/postgres/004_trust_moderation.sql");
+const SCHEMA_005: &str = include_str!("../../migrations/postgres/005_escrow_fund_binds.sql");
 
 fn is_supabase_host(database_url: &str) -> bool {
     let lower = database_url.to_ascii_lowercase();
@@ -173,6 +176,10 @@ pub async fn migrate(pool: &Pool) -> AppResult<()> {
         .batch_execute(SCHEMA_004)
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("postgres migrate 004: {e}")))?;
+    client
+        .batch_execute(SCHEMA_005)
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("postgres migrate 005: {e}")))?;
     Ok(())
 }
 
@@ -890,4 +897,150 @@ fn map_sale_feedback(row: &Row) -> SaleFeedbackRow {
         note: row.get("note"),
         created_at: row.get("created_at"),
     }
+}
+
+fn map_escrow_fund_bind(row: &Row) -> EscrowFundBind {
+    EscrowFundBind {
+        listing_id: row.get("listing_id"),
+        payment_uid: row.get("payment_uid"),
+        content_hash: row.get("content_hash"),
+        oracle_authority: row.get("oracle_authority"),
+    }
+}
+
+pub async fn get_escrow_fund_bind(
+    pool: &Pool,
+    listing_id: Uuid,
+    payment_uid: &str,
+) -> AppResult<Option<EscrowFundBind>> {
+    let client = pool
+        .get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("postgres conn: {e}")))?;
+    let row = client
+        .query_opt(
+            "SELECT listing_id, payment_uid, content_hash, oracle_authority
+             FROM escrow_fund_binds
+             WHERE listing_id = $1 AND payment_uid = $2",
+            &[&listing_id, &payment_uid],
+        )
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("get escrow fund bind: {e}")))?;
+    Ok(row.as_ref().map(map_escrow_fund_bind))
+}
+
+async fn get_escrow_fund_bind_by_payment_uid(
+    pool: &Pool,
+    payment_uid: &str,
+) -> AppResult<Option<EscrowFundBind>> {
+    let client = pool
+        .get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("postgres conn: {e}")))?;
+    let row = client
+        .query_opt(
+            "SELECT listing_id, payment_uid, content_hash, oracle_authority
+             FROM escrow_fund_binds
+             WHERE payment_uid = $1",
+            &[&payment_uid],
+        )
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("get escrow fund bind: {e}")))?;
+    Ok(row.as_ref().map(map_escrow_fund_bind))
+}
+
+fn accept_existing_bind(
+    existing: EscrowFundBind,
+    listing_id: Uuid,
+    payment_uid: &str,
+    content_hash: &str,
+    oracle_authority: &str,
+) -> AppResult<EscrowFundBind> {
+    if existing.listing_id != listing_id
+        || existing.payment_uid != payment_uid
+        || existing.content_hash != content_hash
+        || existing.oracle_authority != oracle_authority
+    {
+        return Err(AppError::Forbidden("escrow fund bind mismatch".into()));
+    }
+    Ok(existing)
+}
+
+pub async fn persist_escrow_fund_bind(
+    pool: &Pool,
+    listing: &ListingRow,
+    payment_uid: &str,
+    oracle_authority: &str,
+) -> AppResult<EscrowFundBind> {
+    if listing.delivery_scheme != "escrow" {
+        return Err(AppError::Forbidden(
+            "exact-rail listings cannot bind escrow funds".into(),
+        ));
+    }
+    let content_hash = listing
+        .content_hash
+        .clone()
+        .ok_or_else(|| AppError::Forbidden("listing missing content_hash".into()))?;
+
+    if let Some(existing) = get_escrow_fund_bind_by_payment_uid(pool, payment_uid).await? {
+        return accept_existing_bind(
+            existing,
+            listing.id,
+            payment_uid,
+            &content_hash,
+            oracle_authority,
+        );
+    }
+
+    let client = pool
+        .get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("postgres conn: {e}")))?;
+    let insert = client
+        .execute(
+            r#"
+            INSERT INTO escrow_fund_binds (listing_id, payment_uid, content_hash, oracle_authority)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (listing_id, payment_uid) DO NOTHING
+            "#,
+            &[&listing.id, &payment_uid, &content_hash, &oracle_authority],
+        )
+        .await;
+    if let Err(e) = insert {
+        let is_unique = e
+            .as_db_error()
+            .map(|d| d.code() == &tokio_postgres::error::SqlState::UNIQUE_VIOLATION)
+            .unwrap_or(false);
+        if !is_unique {
+            return Err(AppError::Internal(anyhow::anyhow!(
+                "insert escrow fund bind: {e}"
+            )));
+        }
+    }
+
+    let existing = get_escrow_fund_bind_by_payment_uid(pool, payment_uid)
+        .await?
+        .ok_or_else(|| {
+            AppError::Internal(anyhow::anyhow!("escrow fund bind missing after insert"))
+        })?;
+    accept_existing_bind(
+        existing,
+        listing.id,
+        payment_uid,
+        &content_hash,
+        oracle_authority,
+    )
+}
+
+#[cfg(test)]
+pub async fn sales_count(pool: &Pool) -> AppResult<i64> {
+    let client = pool
+        .get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("postgres conn: {e}")))?;
+    let row = client
+        .query_one("SELECT COUNT(*)::BIGINT FROM sales", &[])
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sales count: {e}")))?;
+    Ok(row.get(0))
 }

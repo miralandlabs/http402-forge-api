@@ -5,12 +5,16 @@ mod error;
 mod logging;
 mod models;
 mod moderation;
+mod oracle;
 mod preview;
 mod rate_limit;
 mod routes;
 mod state;
 mod storage;
 mod x402;
+
+#[cfg(test)]
+mod test_harness;
 
 use std::sync::Arc;
 
