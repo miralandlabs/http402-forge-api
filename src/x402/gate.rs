@@ -131,6 +131,20 @@ impl PaymentGate {
             }
         };
 
+        if use_escrow {
+            let verify = state.facilitator.verify(&proof).await.map_err(|e| {
+                AppError::PaymentRequired(
+                    payment_required_with_error(&pr, &format!("escrow fund verification failed: {e}"))
+                        .unwrap_or(json!({ "error": "payment failed" })),
+                )
+            })?;
+            crate::escrow::persist_escrow_fund_bind(state, listing, &verify).await?;
+            return Err(AppError::PaymentRequired(payment_required_with_error(
+                &pr,
+                "escrow funded; download unlocks after oracle release",
+            )?));
+        }
+
         let sig = proof
             .get("paymentPayload")
             .and_then(|p| p.pointer("/payload/transaction"))

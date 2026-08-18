@@ -46,6 +46,10 @@ impl Facilitator {
             .map_err(Into::into)
     }
 
+    pub async fn verify(&self, body: &Value) -> Result<Value, FacilitatorExtError> {
+        self.client.verify(body).await.map_err(Into::into)
+    }
+
     pub async fn seller_has_vault(&self, wallet: &str) -> Result<bool, FacilitatorExtError> {
         self.client
             .seller_has_vault(&self.base, wallet)

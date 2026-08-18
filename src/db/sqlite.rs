@@ -7,7 +7,9 @@ use uuid::Uuid;
 
 use super::sales::BuyerPurchaseRow;
 use super::trust::{ListingQualityStats, SaleFeedbackRow};
-use super::{LeaderboardListingRow, LeaderboardWalletRow, ListingRow, PaymentRow, SaleRow};
+use super::{
+    EscrowFundBind, LeaderboardListingRow, LeaderboardWalletRow, ListingRow, PaymentRow, SaleRow,
+};
 use crate::db::listing_filters::{listing_filter_suffix, ListingFilterBinds};
 use crate::error::{AppError, AppResult};
 
@@ -15,6 +17,7 @@ const SCHEMA: &str = include_str!("../../migrations/sqlite/001_init.sql");
 const SCHEMA_002: &str = include_str!("../../migrations/sqlite/002_agent_metadata.sql");
 const SCHEMA_003: &str = include_str!("../../migrations/sqlite/003_preview_content_type.sql");
 const SCHEMA_004: &str = include_str!("../../migrations/sqlite/004_trust_moderation.sql");
+const SCHEMA_005: &str = include_str!("../../migrations/sqlite/005_escrow_fund_binds.sql");
 
 const LISTING_COLUMNS: &str = "id, seller_wallet, display_name, title, description, category,
                         price_micro_usdc, preview_key, preview_content_type, asset_key, content_type, byte_size,
@@ -139,6 +142,15 @@ pub async fn migrate(pool: &Pool) -> AppResult<()> {
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite interact: {e}")))?
         .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite migrate 004: {e}")))?;
+
+    let sql5 = SCHEMA_005.to_string();
+    pool.get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite conn: {e}")))?
+        .interact(move |conn| conn.execute_batch(&sql5))
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite interact: {e}")))?
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite migrate 005: {e}")))?;
     Ok(())
 }
 
@@ -887,6 +899,70 @@ pub async fn listing_quality_stats(
         .map_err(|e| AppError::Internal(anyhow::anyhow!("listing quality stats: {e}")))
 }
 
+pub async fn upsert_escrow_fund_bind(
+    pool: &Pool,
+    listing_id: Uuid,
+    payment_uid: &str,
+    content_hash: &str,
+    oracle_authority: &str,
+) -> AppResult<EscrowFundBind> {
+    let listing_id_s = listing_id.to_string();
+    let payment_uid_s = payment_uid.to_string();
+    let content_hash = content_hash.to_string();
+    let oracle_authority = oracle_authority.to_string();
+    let lookup_uid = payment_uid_s.clone();
+    pool.get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite conn: {e}")))?
+        .interact(move |conn| {
+            conn.execute(
+                r#"
+                INSERT INTO escrow_fund_binds (listing_id, payment_uid, content_hash, oracle_authority)
+                VALUES (?1, ?2, ?3, ?4)
+                ON CONFLICT(listing_id, payment_uid) DO NOTHING
+                "#,
+                params![listing_id_s, payment_uid_s, content_hash, oracle_authority],
+            )
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite interact: {e}")))?
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("upsert escrow fund bind: {e}")))?;
+    get_escrow_fund_bind(pool, listing_id, &lookup_uid)
+        .await?
+        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("escrow fund bind missing after upsert")))
+}
+
+pub async fn get_escrow_fund_bind(
+    pool: &Pool,
+    listing_id: Uuid,
+    payment_uid: &str,
+) -> AppResult<Option<EscrowFundBind>> {
+    let listing_id_s = listing_id.to_string();
+    let payment_uid = payment_uid.to_string();
+    pool.get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite conn: {e}")))?
+        .interact(move |conn| -> rusqlite::Result<Option<EscrowFundBind>> {
+            let mut stmt = conn.prepare(
+                "SELECT listing_id, payment_uid, content_hash, oracle_authority
+                 FROM escrow_fund_binds WHERE listing_id = ?1 AND payment_uid = ?2",
+            )?;
+            let mut rows = stmt.query(params![listing_id_s, payment_uid])?;
+            if let Some(row) = rows.next()? {
+                return Ok(Some(EscrowFundBind {
+                    listing_id: parse_uuid(row.get::<_, String>(0)?)?,
+                    payment_uid: row.get(1)?,
+                    content_hash: row.get(2)?,
+                    oracle_authority: row.get(3)?,
+                }));
+            }
+            Ok(None)
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("sqlite interact: {e}")))?
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("get escrow fund bind: {e}")))
+}
+
 fn map_sale_feedback(row: &Row<'_>) -> rusqlite::Result<SaleFeedbackRow> {
     Ok(SaleFeedbackRow {
         sale_id: parse_uuid(row.get::<_, String>(0)?)?,
@@ -984,6 +1060,62 @@ mod tests {
             .unwrap();
         assert_eq!(count, 1, "exactly one sale row must exist");
 
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn migrate_creates_escrow_fund_binds_table() {
+        let (pool, path) = test_pool().await;
+        let listing_id = Uuid::new_v4();
+        let mut listing = test_listing(listing_id);
+        listing.delivery_scheme = "escrow".into();
+        listing.content_hash = Some("aa".repeat(32));
+        insert_listing(&pool, &listing)
+            .await
+            .expect("insert listing");
+        let uid = "bb".repeat(32);
+        let bind = upsert_escrow_fund_bind(
+            &pool,
+            listing_id,
+            &uid,
+            "aa".repeat(32).as_str(),
+            "Oracle1111111111111111111111111111111111111",
+        )
+        .await
+        .expect("bind");
+        assert_eq!(bind.listing_id, listing_id);
+        assert_eq!(bind.payment_uid, uid);
+        assert_eq!(bind.content_hash, "aa".repeat(32));
+        assert_eq!(
+            bind.oracle_authority,
+            "Oracle1111111111111111111111111111111111111"
+        );
+        let cols: Vec<String> = pool
+            .get()
+            .await
+            .unwrap()
+            .interact(|conn| {
+                let mut stmt = conn
+                    .prepare("PRAGMA table_info(escrow_fund_binds)")
+                    .unwrap();
+                let rows = stmt
+                    .query_map([], |row| row.get::<_, String>(1))
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                Ok::<_, rusqlite::Error>(rows)
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        for required in [
+            "listing_id",
+            "payment_uid",
+            "content_hash",
+            "oracle_authority",
+        ] {
+            assert!(cols.iter().any(|c| c == required), "missing {required}");
+        }
         let _ = std::fs::remove_file(&path);
     }
 }

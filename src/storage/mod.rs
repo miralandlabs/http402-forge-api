@@ -9,7 +9,7 @@ use bytes::Bytes;
 use futures::Stream;
 
 use crate::config::{AppConfig, StorageBackend};
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 
 pub use delivery::{
     serve_object, supports_presigned_upload, DeliveryFormat, DeliveryQuery, ObjectServeOptions,
@@ -31,6 +31,19 @@ pub struct PresignedPut {
 #[async_trait]
 pub trait ObjectStore: Send + Sync {
     async fn put(&self, key: &str, content_type: &str, data: Bytes) -> AppResult<()>;
+    async fn exists(&self, key: &str) -> AppResult<bool> {
+        match self.head(key).await {
+            Ok(_) => Ok(true),
+            Err(AppError::NotFound) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+    async fn put_if_absent(&self, key: &str, content_type: &str, data: Bytes) -> AppResult<()> {
+        if self.exists(key).await? {
+            return Err(AppError::Conflict("object key already exists".into()));
+        }
+        self.put(key, content_type, data).await
+    }
     async fn get(&self, key: &str) -> AppResult<(Bytes, String)>;
     async fn head(&self, key: &str) -> AppResult<String>;
     async fn object_size(&self, key: &str) -> AppResult<u64>;

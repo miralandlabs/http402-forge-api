@@ -678,12 +678,6 @@ pub async fn create(
     // Final vault decision is in publish_listing (paid only). Early checks above are best-effort.
 
     let id = Uuid::new_v4();
-    let asset_key = object_key("assets", id, "asset");
-    state
-        .storage
-        .put(&asset_key, &asset_ct, asset_data.clone())
-        .await?;
-
     let row = publish_listing(
         &state,
         PublishListingInput {
@@ -702,8 +696,8 @@ pub async fn create(
             preview_bytes,
         },
         id,
-        asset_key,
-        true,
+        String::new(),
+        false,
     )
     .await?;
 
@@ -815,12 +809,14 @@ pub(crate) async fn publish_listing(
         )));
     }
 
-    if !asset_already_stored {
+    let content_key = computed_hash.clone();
+    if !(asset_already_stored && asset_key == content_key) {
         state
             .storage
-            .put(&asset_key, &input.asset_ct, input.asset_data.clone())
+            .put_if_absent(&content_key, &input.asset_ct, input.asset_data.clone())
             .await?;
     }
+    let asset_key = content_key;
 
     let (preview_key, preview_content_type) = store_listing_preview(
         state,

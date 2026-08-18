@@ -189,7 +189,7 @@ Content-Type: multipart/form-data
 | `agent_friendly` | no | default false |
 | `tags` | no | Comma-separated or JSON array (agent-oriented listings) |
 | `license` | no | `personal` or `commercial` |
-| `content_hash` | no | Optional; if sent, **must equal** server SHA-256 of `asset`. Server always computes and stores hash from asset bytes. |
+| `content_hash` | no | Optional; if sent, **must equal** server SHA-256 of `asset`. Server always computes SHA-256 hex of asset bytes, stores it as `contentHash`, and uses that hex as the **immutable object key**. A second publish of the same bytes is **409** (key already exists). |
 | `asset` | yes | paid download file |
 | `preview` | no | optional teaser file (any MIME); PDF uploads are rasterized to JPEG for thumbnails; auto-generated if omitted (see below) |
 
@@ -320,9 +320,35 @@ GET /api/v1/listings/{id}/download
 4. Retry with header `PAYMENT-SIGNATURE: {base64 proof}`.
 5. **200** → response body is the asset file stream (`Content-Type` from listing). Response header **`X-Forge-Sale-Id`** is the purchase row UUID (use for sale feedback).
 
+Oracle headers (`X-Forge-Oracle-Sig`, `X-Forge-Payment-Uid`, `X-Forge-Oracle-Ts`) are **not** payment. The payment door only reads `PAYMENT-SIGNATURE`.
+
 **Removed listings:** no **402** — new buyers get **404**. Agents with a stored payment proof retry step 4 with the same `PAYMENT-SIGNATURE`; idempotency returns **200** without charging again.
 
 Idempotency: same payment signature returns the file without double-charging (checked via `payments` table). Works for both active and removed listings.
+
+## Oracle verdict door (preview escrow)
+
+`GET /api/v1/oracle/listings/{listing_id}/artifact` is a **separate** door for the named `oracle_authority` of a funded sla-escrow payment. It streams the **same** immutable object as the payment door, with **no HTTP 402** and **no `sales` row**.
+
+Exact-rail listings (`deliveryScheme=exact`) never open this route (**403**). Upload size limits are unchanged: assets at or above `ESCROW_SIZE_THRESHOLD_BYTES` (default 100 MiB) are still rejected.
+
+Required headers (all must verify):
+
+| Header | Value |
+|--------|--------|
+| `X-Forge-Payment-Uid` | 64-char hex `payment_uid` |
+| `X-Forge-Oracle-Ts` | Unix seconds; must be within **±60s** |
+| `X-Forge-Oracle-Sig` | Base58 Ed25519 signature by the bind row’s `oracle_authority` |
+
+UTF-8 message (no JSON):
+
+```text
+forge-oracle-v1|{listing_id}|{payment_uid_hex}|{ts}|{host}
+```
+
+`host` is the Forge API public host from `SELLER_PUBLIC_BASE_URL` (e.g. `preview.forge.http402.trade`). Forge accepts the GET only when a bind row exists for `(listing_id, payment_uid)` on an **escrow** listing. Missing or invalid signature → **403**.
+
+Successful sla-escrow **fund** (buyer `PAYMENT-SIGNATURE` on the payment door while the listing is escrow) persists `escrow_fund_binds` with `listing_id`, `payment_uid`, `content_hash`, and on-chain `oracle_authority`. The payment door still does not stream goods on fund (no sale).
 
 ## Preview
 

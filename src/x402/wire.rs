@@ -62,3 +62,22 @@ pub fn extract_payment_header_value(get_header: impl Fn(&str) -> Option<String>)
 pub fn encode_payment_response(settle_result: &Value) -> String {
     B64.encode(settle_result.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn payment_header_ignores_oracle_signatures() {
+        let v = extract_payment_header_value(|name| match name {
+            "x-forge-oracle-sig" => Some("oracle-sig".into()),
+            "x-forge-payment-uid" => Some("aa".repeat(32)),
+            _ => None,
+        });
+        assert!(v.is_none());
+        let v = extract_payment_header_value(|name| {
+            (name == "payment-signature").then(|| "x402-proof".into())
+        });
+        assert_eq!(v.as_deref(), Some("x402-proof"));
+    }
+}

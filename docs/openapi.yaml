@@ -47,7 +47,7 @@ components:
           nullable: true
         contentHash:
           type: string
-          description: Lowercase SHA-256 hex of asset bytes (server-computed on create)
+          description: Lowercase SHA-256 hex of asset bytes; also the immutable object storage key
         qualityScore:
           type: integer
           minimum: 0
@@ -497,7 +497,7 @@ paths:
         for purchase-linked feedback. Removed listings return 404 for new purchases.
         Buyers with a prior payment proof may retry with the same PAYMENT-SIGNATURE header (idempotency).
         After a failed transfer, buyers may also use GET …/redownload with a wallet-signed challenge
-        (see /api/v1/buyer/redownload-challenge).
+        (see /api/v1/buyer/redownload-challenge). Oracle verdict headers are ignored here.
       parameters:
         - in: path
           name: id
@@ -528,6 +528,45 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorBody" }
         "403":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorBody" }
+  /api/v1/oracle/listings/{listing_id}/artifact:
+    get:
+      summary: Oracle verdict door (stream the same object; not a sale)
+      description: |
+        Preview-cluster escrow door for the payment's `oracle_authority` only.
+        Verifies `X-Forge-Payment-Uid`, `X-Forge-Oracle-Ts` (±60s), and
+        `X-Forge-Oracle-Sig` over `forge-oracle-v1|{listing_id}|{payment_uid_hex}|{ts}|{host}`.
+        Requires an escrow listing and a matching `escrow_fund_binds` row.
+        Streams the stored object with **no 402** and **no sales row**.
+        Exact-rail listings never open this route (403). Oracle signatures are not
+        accepted on GET /api/v1/listings/{id}/download.
+      parameters:
+        - in: path
+          name: listing_id
+          required: true
+          schema: { type: string, format: uuid }
+        - in: header
+          name: X-Forge-Payment-Uid
+          required: true
+          schema: { type: string }
+          description: 64-char hex payment_uid
+        - in: header
+          name: X-Forge-Oracle-Ts
+          required: true
+          schema: { type: string }
+          description: Unix seconds; must be within ±60s of server time
+        - in: header
+          name: X-Forge-Oracle-Sig
+          required: true
+          schema: { type: string }
+          description: Base58 Ed25519 signature by the bind row oracle_authority
+      responses:
+        "200":
+          description: Asset bytes (same object as the payment door)
+        "403":
+          description: Missing/invalid signature, exact-rail listing, or no bind row
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorBody" }

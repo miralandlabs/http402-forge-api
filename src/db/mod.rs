@@ -12,6 +12,14 @@ pub use payment::PaymentRow;
 pub use sales::{BuyerPurchaseRow, LeaderboardListingRow, LeaderboardWalletRow, SaleRow};
 pub use trust::{validate_feedback_outcome, ListingQualityStats, SaleFeedbackRow};
 
+#[derive(Debug, Clone)]
+pub struct EscrowFundBind {
+    pub listing_id: uuid::Uuid,
+    pub payment_uid: String,
+    pub content_hash: String,
+    pub oracle_authority: String,
+}
+
 use deadpool_postgres::Pool as PgPool;
 use deadpool_sqlite::Pool as SqlitePool;
 
@@ -349,6 +357,52 @@ impl Database {
         match &self.backend {
             DbBackend::Postgres(pool) => postgres::listing_quality_stats(pool, listing_ids).await,
             DbBackend::Sqlite(pool) => sqlite::listing_quality_stats(pool, listing_ids).await,
+        }
+    }
+
+    pub async fn upsert_escrow_fund_bind(
+        &self,
+        listing_id: uuid::Uuid,
+        payment_uid: &str,
+        content_hash: &str,
+        oracle_authority: &str,
+    ) -> AppResult<EscrowFundBind> {
+        match &self.backend {
+            DbBackend::Postgres(pool) => {
+                postgres::upsert_escrow_fund_bind(
+                    pool,
+                    listing_id,
+                    payment_uid,
+                    content_hash,
+                    oracle_authority,
+                )
+                .await
+            }
+            DbBackend::Sqlite(pool) => {
+                sqlite::upsert_escrow_fund_bind(
+                    pool,
+                    listing_id,
+                    payment_uid,
+                    content_hash,
+                    oracle_authority,
+                )
+                .await
+            }
+        }
+    }
+
+    pub async fn get_escrow_fund_bind(
+        &self,
+        listing_id: uuid::Uuid,
+        payment_uid: &str,
+    ) -> AppResult<Option<EscrowFundBind>> {
+        match &self.backend {
+            DbBackend::Postgres(pool) => {
+                postgres::get_escrow_fund_bind(pool, listing_id, payment_uid).await
+            }
+            DbBackend::Sqlite(pool) => {
+                sqlite::get_escrow_fund_bind(pool, listing_id, payment_uid).await
+            }
         }
     }
 }
