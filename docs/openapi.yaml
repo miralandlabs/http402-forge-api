@@ -498,6 +498,7 @@ paths:
         Buyers with a prior payment proof may retry with the same PAYMENT-SIGNATURE header (idempotency).
         After a failed transfer, buyers may also use GET …/redownload with a wallet-signed challenge
         (see /api/v1/buyer/redownload-challenge).
+        This route **does not** accept oracle verdict headers (`X-Forge-Oracle-Sig`, etc.).
       parameters:
         - in: path
           name: id
@@ -528,6 +529,45 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorBody" }
         "403":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorBody" }
+  /api/v1/oracle/listings/{id}/artifact:
+    get:
+      summary: Oracle verdict door (escrow listings only; no 402, no sale row)
+      description: |
+        Streams the same immutable object as the payment door for a **funded sla-escrow payment**.
+        Only the payment's configured `oracle_authority` may call this route. Exact-rail listings
+        always return 403. Requires headers `X-Forge-Payment-Uid` (64-char hex), `X-Forge-Oracle-Ts`
+        (unix seconds, ±60s replay window), and `X-Forge-Oracle-Sig` (base58 Ed25519 over
+        `forge-oracle-v1|{listing_id}|{payment_uid_hex}|{ts}|{host}`).
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+        - in: header
+          name: X-Forge-Payment-Uid
+          required: true
+          schema: { type: string, pattern: "^[0-9a-fA-F]{64}$" }
+        - in: header
+          name: X-Forge-Oracle-Ts
+          required: true
+          schema: { type: integer, format: int64 }
+        - in: header
+          name: X-Forge-Oracle-Sig
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Raw listing asset bytes (same object as payment door)
+        "403":
+          description: Missing/invalid signature, bind mismatch, exact-rail listing, or stale timestamp
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorBody" }
+        "404":
+          description: Listing or bound object not found
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorBody" }

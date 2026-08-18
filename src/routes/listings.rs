@@ -22,7 +22,7 @@ use crate::preview::{
     is_pdf_content_type,
 };
 use crate::state::SharedState;
-use crate::storage::{object_key, serve_object, DeliveryQuery, ObjectServeOptions, ObjectStore};
+use crate::storage::{content_hash_object_key, object_key, serve_object, DeliveryQuery, ObjectServeOptions, ObjectStore};
 use crate::x402::PaymentGate;
 
 #[derive(Debug, Deserialize)]
@@ -330,6 +330,12 @@ pub async fn download(
         )
         .await;
     };
+
+    if payment.escrow_funded {
+        return Err(AppError::Forbidden(
+            "escrow payment funded; download unlocks after release".into(),
+        ));
+    }
 
     let mode = if payment.already_paid {
         "retry_same_payment_proof"
@@ -678,12 +684,6 @@ pub async fn create(
     // Final vault decision is in publish_listing (paid only). Early checks above are best-effort.
 
     let id = Uuid::new_v4();
-    let asset_key = object_key("assets", id, "asset");
-    state
-        .storage
-        .put(&asset_key, &asset_ct, asset_data.clone())
-        .await?;
-
     let row = publish_listing(
         &state,
         PublishListingInput {
@@ -702,8 +702,7 @@ pub async fn create(
             preview_bytes,
         },
         id,
-        asset_key,
-        true,
+        false,
     )
     .await?;
 
@@ -736,7 +735,6 @@ pub(crate) async fn publish_listing(
     state: &SharedState,
     input: PublishListingInput,
     id: Uuid,
-    asset_key: String,
     asset_already_stored: bool,
 ) -> AppResult<ListingRow> {
     validate_wallet(&input.seller_wallet).map_err(|m| AppError::validation("seller_wallet", m))?;
@@ -762,6 +760,7 @@ pub(crate) async fn publish_listing(
         }
     }
     let content_hash = Some(computed_hash.clone());
+    let asset_key = content_hash_object_key(&computed_hash);
 
     if state.db.is_content_hash_blocked(&computed_hash).await? {
         return Err(AppError::Forbidden(
@@ -818,8 +817,12 @@ pub(crate) async fn publish_listing(
     if !asset_already_stored {
         state
             .storage
-            .put(&asset_key, &input.asset_ct, input.asset_data.clone())
+            .put_if_absent(&asset_key, &input.asset_ct, input.asset_data.clone())
             .await?;
+    } else if state.storage.head(&asset_key).await.is_err() {
+        return Err(AppError::BadRequest(
+            "asset upload incomplete or content hash mismatch".into(),
+        ));
     }
 
     let (preview_key, preview_content_type) = store_listing_preview(

@@ -1,4 +1,5 @@
 mod accepts;
+mod escrow_fund;
 mod facilitator;
 mod facilitator_client;
 mod gate;

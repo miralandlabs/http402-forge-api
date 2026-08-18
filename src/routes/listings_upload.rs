@@ -180,9 +180,9 @@ pub async fn complete_upload(
         .seller_auth
         .consume_upload_session(body.listing_id, &body.seller_wallet)?;
 
-    let asset_key = object_key("assets", body.listing_id, "asset");
-    let asset_size = state.storage.object_size(&asset_key).await?;
-    let asset_ct = state.storage.head(&asset_key).await?;
+    let temp_asset_key = object_key("assets", body.listing_id, "asset");
+    let asset_size = state.storage.object_size(&temp_asset_key).await?;
+    let asset_ct = state.storage.head(&temp_asset_key).await?;
 
     let preview_bytes = if body.preview_uploaded {
         let preview_key = object_key("previews", body.listing_id, "preview");
@@ -193,7 +193,7 @@ pub async fn complete_upload(
         None
     };
 
-    let (asset_data, _) = state.storage.get(&asset_key).await?;
+    let (asset_data, _) = state.storage.get(&temp_asset_key).await?;
     if asset_data.len() as u64 != asset_size {
         return Err(AppError::BadRequest("asset upload incomplete".into()));
     }
@@ -216,8 +216,7 @@ pub async fn complete_upload(
             preview_bytes,
         },
         body.listing_id,
-        asset_key,
-        true,
+        false,
     )
     .await?;
 

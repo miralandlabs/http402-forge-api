@@ -1,5 +1,6 @@
 use crate::db::ListingRow;
 use crate::x402::accepts::{build_accepts_for_listing, idempotency_key, listing_uses_escrow};
+use crate::x402::escrow_fund::extract_escrow_fund_details;
 use crate::x402::wire::{
     encode_payment_response, extract_payment_header_value, parse_payment_header,
     payment_required_json, PaymentRequired, ResourceInfo,
@@ -17,6 +18,7 @@ pub struct PaymentContext {
     pub payment_signature: String,
     pub settle_proof: Value,
     pub already_paid: bool,
+    pub escrow_funded: bool,
 }
 
 pub struct PaymentGate;
@@ -34,6 +36,8 @@ impl PaymentGate {
         if listing.price_micro_usdc == 0 {
             return Ok(None);
         }
+
+        reject_oracle_verdict_headers(headers)?;
 
         let use_escrow = listing_uses_escrow(
             &listing.delivery_scheme,
@@ -145,7 +149,12 @@ impl PaymentGate {
                 payment_signature: existing.tx_signature,
                 settle_proof: json!({}),
                 already_paid: true,
+                escrow_funded: false,
             }));
+        }
+
+        if use_escrow {
+            return Self::check_escrow_fund(state, listing, &proof, &pr, &sig, &raw).await;
         }
 
         let settle = state
@@ -188,6 +197,72 @@ impl PaymentGate {
             payment_signature: sig,
             settle_proof: settle,
             already_paid: false,
+            escrow_funded: false,
+        }))
+    }
+
+    async fn check_escrow_fund(
+        state: &AppState,
+        listing: &ListingRow,
+        proof: &Value,
+        pr: &PaymentRequired,
+        sig: &str,
+        raw: &str,
+    ) -> AppResult<Option<PaymentContext>> {
+        let _ = raw;
+        let fund = state
+            .facilitator
+            .verify_and_fund(proof)
+            .await
+            .map_err(|e| {
+                AppError::PaymentRequired(
+                    payment_required_with_error(pr, &format!("escrow fund failed: {e}"))
+                        .unwrap_or(json!({ "error": "payment failed" })),
+                )
+            })?;
+
+        let details = extract_escrow_fund_details(&fund, proof).ok_or_else(|| {
+            AppError::PaymentRequired(
+                payment_required_with_error(pr, "escrow fund missing paymentUid or oracleAuthority")
+                    .unwrap_or(json!({ "error": "payment failed" })),
+            )
+        })?;
+
+        if !state
+            .config
+            .oracle_authorities
+            .iter()
+            .any(|a| a == &details.oracle_authority)
+        {
+            return Err(AppError::PaymentRequired(
+                payment_required_with_error(pr, "oracle authority is not allowed for this host")
+                    .unwrap_or(json!({ "error": "payment failed" })),
+            ));
+        }
+
+        let content_hash = listing.content_hash.clone().ok_or_else(|| {
+            AppError::PaymentRequired(
+                payment_required_with_error(pr, "listing has no content hash")
+                    .unwrap_or(json!({ "error": "payment failed" })),
+            )
+        })?;
+
+        state
+            .db
+            .insert_escrow_fund_bind(
+                listing.id,
+                &details.payment_uid,
+                &content_hash,
+                &details.oracle_authority,
+            )
+            .await?;
+
+        Ok(Some(PaymentContext {
+            payer_wallet: details.payer_wallet,
+            payment_signature: sig.to_string(),
+            settle_proof: fund,
+            already_paid: false,
+            escrow_funded: true,
         }))
     }
 
@@ -214,6 +289,7 @@ impl PaymentGate {
         headers: &HeaderMap,
         canonical_path: &str,
     ) -> AppResult<PaymentContext> {
+        reject_oracle_verdict_headers(headers)?;
         let raw = extract_payment_header_value(|name| {
             headers
                 .get(name)
@@ -239,6 +315,7 @@ impl PaymentGate {
             payment_signature: existing.tx_signature,
             settle_proof: json!({}),
             already_paid: true,
+            escrow_funded: false,
         })
     }
 
@@ -251,8 +328,34 @@ impl PaymentGate {
     }
 }
 
+fn reject_oracle_verdict_headers(headers: &HeaderMap) -> AppResult<()> {
+    if headers.contains_key("x-forge-oracle-sig")
+        || headers.contains_key("x-forge-oracle-ts")
+        || headers.contains_key("x-forge-payment-uid")
+    {
+        return Err(AppError::Forbidden(
+            "payment door does not accept oracle verdict signatures".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn payment_required_with_error(pr: &PaymentRequired, msg: &str) -> AppResult<Value> {
     let mut copy = pr.clone();
     copy.error = Some(msg.to_string());
     payment_required_json(&copy).map_err(|e| AppError::Internal(anyhow::anyhow!("402: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    #[test]
+    fn payment_door_rejects_oracle_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forge-oracle-sig", HeaderValue::from_static("sig"));
+        let err = reject_oracle_verdict_headers(&headers).unwrap_err();
+        assert!(matches!(err, AppError::Forbidden(_)));
+    }
 }

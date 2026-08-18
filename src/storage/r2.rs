@@ -83,6 +83,19 @@ impl ObjectStore for R2Storage {
         Ok(())
     }
 
+    async fn put_if_absent(&self, key: &str, content_type: &str, data: Bytes) -> AppResult<()> {
+        if self.head(key).await.is_ok() {
+            return Err(AppError::Conflict(format!(
+                "object key already exists: {key}"
+            )));
+        }
+        self.bucket
+            .put_object_with_content_type(key, &data, content_type)
+            .await
+            .map_err(|e| AppError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
     async fn get(&self, key: &str) -> AppResult<(Bytes, String)> {
         let (content_type, _) = self.head_meta(key).await?;
         let response = self

@@ -54,6 +54,30 @@ impl ObjectStore for LocalStorage {
         Ok(())
     }
 
+    async fn put_if_absent(&self, key: &str, content_type: &str, data: Bytes) -> AppResult<()> {
+        let path = self.path_for(key);
+        if path.exists() {
+            return Err(AppError::Conflict(format!(
+                "object key already exists: {key}"
+            )));
+        }
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .await
+                .map_err(|e| AppError::Storage(e.to_string()))?;
+        }
+        let mut file = fs::File::create(&path)
+            .await
+            .map_err(|e| AppError::Storage(e.to_string()))?;
+        file.write_all(&data)
+            .await
+            .map_err(|e| AppError::Storage(e.to_string()))?;
+        fs::write(self.meta_path(key), content_type)
+            .await
+            .map_err(|e| AppError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
     async fn get(&self, key: &str) -> AppResult<(Bytes, String)> {
         let path = self.path_for(key);
         if !path.exists() {
@@ -113,5 +137,31 @@ impl ObjectStore for LocalStorage {
         Err(AppError::Storage(
             "presigned PUT requires STORAGE_BACKEND=r2".into(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+
+    use crate::error::AppError;
+    use crate::storage::{LocalStorage, ObjectStore};
+
+    #[tokio::test]
+    async fn put_if_absent_rejects_existing_key() {
+        let root = std::env::temp_dir().join(format!("forge-storage-test-{}", uuid::Uuid::new_v4()));
+        let store = LocalStorage::new(root.clone()).expect("storage");
+        let key = "deadbeef";
+        let data = Bytes::from_static(b"hello");
+        store
+            .put_if_absent(key, "text/plain", data.clone())
+            .await
+            .expect("first put");
+        let err = store
+            .put_if_absent(key, "text/plain", data)
+            .await
+            .expect_err("second put must fail");
+        assert!(matches!(err, AppError::Conflict(_)));
+        let _ = std::fs::remove_dir_all(root);
     }
 }

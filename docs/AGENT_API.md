@@ -189,7 +189,7 @@ Content-Type: multipart/form-data
 | `agent_friendly` | no | default false |
 | `tags` | no | Comma-separated or JSON array (agent-oriented listings) |
 | `license` | no | `personal` or `commercial` |
-| `content_hash` | no | Optional; if sent, **must equal** server SHA-256 of `asset`. Server always computes and stores hash from asset bytes. |
+| `content_hash` | no | Optional; if sent, **must equal** server SHA-256 of `asset`. Server always computes and stores hash from asset bytes. Assets are stored under the **immutable SHA-256 hex key**; republishing identical bytes returns **409 Conflict**. |
 | `asset` | yes | paid download file |
 | `preview` | no | optional teaser file (any MIME); PDF uploads are rasterized to JPEG for thumbnails; auto-generated if omitted (see below) |
 
@@ -323,6 +323,36 @@ GET /api/v1/listings/{id}/download
 **Removed listings:** no **402** — new buyers get **404**. Agents with a stored payment proof retry step 4 with the same `PAYMENT-SIGNATURE`; idempotency returns **200** without charging again.
 
 Idempotency: same payment signature returns the file without double-charging (checked via `payments` table). Works for both active and removed listings.
+
+**Payment door vs oracle verdict:** `GET …/download` accepts only `PAYMENT-SIGNATURE` (x402 buyer proof). It **rejects** oracle verdict headers (`X-Forge-Oracle-Sig`, `X-Forge-Oracle-Ts`, `X-Forge-Payment-Uid`). Oracles must use the separate verdict route below.
+
+## Oracle verdict door (escrow only; preview API)
+
+For **sla-escrow** listings after a successful fund, Forge records a bind row (`listing_id`, `payment_uid`, `content_hash`, `oracle_authority`). The designated oracle fetches bytes for independent hashing via:
+
+```http
+GET /api/v1/oracle/listings/{listing_id}/artifact
+X-Forge-Payment-Uid: {64-char hex payment_uid}
+X-Forge-Oracle-Ts: {unix seconds}
+X-Forge-Oracle-Sig: {base58 Ed25519}
+```
+
+Sign UTF-8 message (no JSON canonicalization):
+
+```text
+forge-oracle-v1|{listing_id}|{payment_uid_hex}|{ts}|{host}
+```
+
+`host` is the Forge API public hostname from `SELLER_PUBLIC_BASE_URL` (e.g. `preview.forge.http402.trade`). Replay window: **±60 seconds**.
+
+| Check | Result |
+|-------|--------|
+| Exact-rail listing (`deliveryScheme=exact`) | **403** — verdict door never opens |
+| Missing/invalid signature or stale `ts` | **403** |
+| No bind row for `(listing_id, payment_uid)` | **403** |
+| Valid bind + escrow listing | **200** — streams the **same** immutable object as the payment door; **no 402**, **no sales row** |
+
+Escrow fund bind rows are written when `GET …/download` completes a successful **sla-escrow fund** (not exact settle). Buyer download after fund remains gated until release (Phase 3).
 
 ## Preview
 

@@ -24,6 +24,7 @@ pub enum FacilitatorError {
 pub struct FacilitatorClient {
     verify_url: Url,
     settle_url: Url,
+    fund_url: Url,
     client: reqwest::Client,
 }
 
@@ -34,9 +35,12 @@ impl FacilitatorClient {
             .map_err(|e| FacilitatorError::Url(e.to_string()))?;
         let settle = Url::parse(&format!("{base}/api/v1/facilitator/settle"))
             .map_err(|e| FacilitatorError::Url(e.to_string()))?;
+        let fund = Url::parse(&format!("{base}/api/v1/facilitator/fund"))
+            .map_err(|e| FacilitatorError::Url(e.to_string()))?;
         Ok(Self {
             verify_url: verify,
             settle_url: settle,
+            fund_url: fund,
             client: reqwest::Client::new(),
         })
     }
@@ -111,6 +115,73 @@ impl FacilitatorClient {
                 "{e}; status={}; body_prefix={}",
                 status.as_u16(),
                 settle_text.chars().take(500).collect::<String>()
+            ))
+        })
+    }
+
+    pub async fn verify_and_fund(&self, body: &Value) -> Result<Value, FacilitatorError> {
+        let verify_res = self
+            .client
+            .post(self.verify_url.clone())
+            .header("Content-Type", "application/json")
+            .json(body)
+            .send()
+            .await?;
+        let status = verify_res.status();
+        let verify_text = verify_res.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(FacilitatorError::Http {
+                status: status.as_u16(),
+                body: verify_text,
+                step: "verify",
+            });
+        }
+
+        let verify_value: Value = serde_json::from_str(&verify_text).map_err(|e| {
+            FacilitatorError::InvalidSettleJson(format!(
+                "verify response not JSON: {e}; body_prefix={}",
+                verify_text.chars().take(300).collect::<String>()
+            ))
+        })?;
+
+        if !verify_json_indicates_valid(&verify_value) {
+            return Err(FacilitatorError::Http {
+                status: status.as_u16(),
+                body: verify_text,
+                step: "verify",
+            });
+        }
+
+        let mut fund_body = body.clone();
+        if let Some(cid) = verify_value
+            .get("correlationId")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            merge_correlation_id(&mut fund_body, cid);
+        }
+
+        let fund_res = self
+            .client
+            .post(self.fund_url.clone())
+            .header("Content-Type", "application/json")
+            .json(&fund_body)
+            .send()
+            .await?;
+        let status = fund_res.status();
+        let fund_text = fund_res.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(FacilitatorError::Http {
+                status: status.as_u16(),
+                body: fund_text,
+                step: "fund",
+            });
+        }
+        serde_json::from_str(&fund_text).map_err(|e| {
+            FacilitatorError::InvalidSettleJson(format!(
+                "{e}; status={}; body_prefix={}",
+                status.as_u16(),
+                fund_text.chars().take(500).collect::<String>()
             ))
         })
     }
