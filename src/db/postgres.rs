@@ -9,6 +9,7 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 use uuid::Uuid;
 use webpki_roots::TLS_SERVER_ROOTS;
 
+use super::escrow::EscrowFundBind;
 use super::sales::BuyerPurchaseRow;
 use super::trust::{ListingQualityStats, SaleFeedbackRow};
 use super::{LeaderboardListingRow, LeaderboardWalletRow, ListingRow, PaymentRow, SaleRow};
@@ -20,6 +21,7 @@ const SCHEMA: &str = include_str!("../../migrations/postgres/001_init.sql");
 const SCHEMA_002: &str = include_str!("../../migrations/postgres/002_agent_metadata.sql");
 const SCHEMA_003: &str = include_str!("../../migrations/postgres/003_preview_content_type.sql");
 const SCHEMA_004: &str = include_str!("../../migrations/postgres/004_trust_moderation.sql");
+const SCHEMA_005: &str = include_str!("../../migrations/postgres/005_escrow_fund_binds.sql");
 
 fn is_supabase_host(database_url: &str) -> bool {
     let lower = database_url.to_ascii_lowercase();
@@ -173,6 +175,10 @@ pub async fn migrate(pool: &Pool) -> AppResult<()> {
         .batch_execute(SCHEMA_004)
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("postgres migrate 004: {e}")))?;
+    client
+        .batch_execute(SCHEMA_005)
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("postgres migrate 005: {e}")))?;
     Ok(())
 }
 
@@ -878,6 +884,88 @@ pub async fn listing_quality_stats(
             )
         })
         .collect())
+}
+
+pub async fn upsert_escrow_fund_bind(
+    pool: &Pool,
+    listing_id: Uuid,
+    payment_uid: &str,
+    content_hash: &str,
+    oracle_authority: &str,
+) -> AppResult<EscrowFundBind> {
+    let client = pool
+        .get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("postgres conn: {e}")))?;
+    client
+        .execute(
+            r#"
+            INSERT INTO escrow_fund_binds (
+                listing_id, payment_uid, content_hash, oracle_authority
+            ) VALUES ($1, $2, $3, $4)
+            ON CONFLICT (listing_id, payment_uid) DO NOTHING
+            "#,
+            &[&listing_id, &payment_uid, &content_hash, &oracle_authority],
+        )
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("upsert escrow fund bind: {e}")))?;
+    let row = client
+        .query_one(
+            "SELECT listing_id, payment_uid, content_hash, oracle_authority
+             FROM escrow_fund_binds
+             WHERE listing_id = $1 AND payment_uid = $2",
+            &[&listing_id, &payment_uid],
+        )
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("get escrow fund bind: {e}")))?;
+    let bind = EscrowFundBind {
+        listing_id: row.get("listing_id"),
+        payment_uid: row.get("payment_uid"),
+        content_hash: row.get("content_hash"),
+        oracle_authority: row.get("oracle_authority"),
+    };
+    if bind.content_hash != content_hash || bind.oracle_authority != oracle_authority {
+        return Err(AppError::Conflict("escrow fund bind mismatch".into()));
+    }
+    Ok(bind)
+}
+
+pub async fn get_escrow_fund_bind(
+    pool: &Pool,
+    listing_id: Uuid,
+    payment_uid: &str,
+) -> AppResult<Option<EscrowFundBind>> {
+    let client = pool
+        .get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("postgres conn: {e}")))?;
+    let row = client
+        .query_opt(
+            "SELECT listing_id, payment_uid, content_hash, oracle_authority
+             FROM escrow_fund_binds
+             WHERE listing_id = $1 AND payment_uid = $2",
+            &[&listing_id, &payment_uid],
+        )
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("get escrow fund bind: {e}")))?;
+    Ok(row.map(|row| EscrowFundBind {
+        listing_id: row.get("listing_id"),
+        payment_uid: row.get("payment_uid"),
+        content_hash: row.get("content_hash"),
+        oracle_authority: row.get("oracle_authority"),
+    }))
+}
+
+pub async fn count_sales(pool: &Pool) -> AppResult<i64> {
+    let client = pool
+        .get()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("postgres conn: {e}")))?;
+    let row = client
+        .query_one("SELECT COUNT(*) FROM sales", &[])
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("count sales: {e}")))?;
+    Ok(row.get(0))
 }
 
 fn map_sale_feedback(row: &Row) -> SaleFeedbackRow {

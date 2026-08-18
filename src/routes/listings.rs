@@ -22,7 +22,10 @@ use crate::preview::{
     is_pdf_content_type,
 };
 use crate::state::SharedState;
-use crate::storage::{object_key, serve_object, DeliveryQuery, ObjectServeOptions, ObjectStore};
+use crate::storage::{
+    asset_content_key, content_sha256_hex, object_key, serve_object, DeliveryQuery,
+    ObjectServeOptions, ObjectStore,
+};
 use crate::x402::PaymentGate;
 
 #[derive(Debug, Deserialize)]
@@ -678,12 +681,6 @@ pub async fn create(
     // Final vault decision is in publish_listing (paid only). Early checks above are best-effort.
 
     let id = Uuid::new_v4();
-    let asset_key = object_key("assets", id, "asset");
-    state
-        .storage
-        .put(&asset_key, &asset_ct, asset_data.clone())
-        .await?;
-
     let row = publish_listing(
         &state,
         PublishListingInput {
@@ -702,8 +699,6 @@ pub async fn create(
             preview_bytes,
         },
         id,
-        asset_key,
-        true,
     )
     .await?;
 
@@ -736,8 +731,6 @@ pub(crate) async fn publish_listing(
     state: &SharedState,
     input: PublishListingInput,
     id: Uuid,
-    asset_key: String,
-    asset_already_stored: bool,
 ) -> AppResult<ListingRow> {
     validate_wallet(&input.seller_wallet).map_err(|m| AppError::validation("seller_wallet", m))?;
     validate_category(&input.category).map_err(|m| AppError::validation("category", m))?;
@@ -752,7 +745,7 @@ pub(crate) async fn publish_listing(
     validate_license(input.license.as_deref()).map_err(|m| AppError::validation("license", m))?;
     let tags = parse_tags_field(&input.tags_raw).map_err(|m| AppError::validation("tags", m))?;
 
-    let computed_hash = sha256_hex(&input.asset_data);
+    let computed_hash = content_sha256_hex(&input.asset_data);
     if let Some(ref provided) = input.content_hash {
         if provided.trim().to_ascii_lowercase() != computed_hash {
             return Err(AppError::validation(
@@ -762,6 +755,7 @@ pub(crate) async fn publish_listing(
         }
     }
     let content_hash = Some(computed_hash.clone());
+    let asset_key = asset_content_key(&computed_hash);
 
     if state.db.is_content_hash_blocked(&computed_hash).await? {
         return Err(AppError::Forbidden(
@@ -815,12 +809,10 @@ pub(crate) async fn publish_listing(
         )));
     }
 
-    if !asset_already_stored {
-        state
-            .storage
-            .put(&asset_key, &input.asset_ct, input.asset_data.clone())
-            .await?;
-    }
+    state
+        .storage
+        .put_if_absent(&asset_key, &input.asset_ct, input.asset_data.clone())
+        .await?;
 
     let (preview_key, preview_content_type) = store_listing_preview(
         state,
@@ -991,7 +983,54 @@ async fn store_uploaded_preview(
     Ok((key, preview_ct.to_string()))
 }
 
-fn sha256_hex(data: &Bytes) -> String {
-    use sha2::{Digest, Sha256};
-    format!("{:x}", Sha256::digest(data))
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::AppError;
+    use crate::state::test_support::test_state;
+    use crate::storage::{asset_content_key, content_sha256_hex, ObjectStore};
+    use bytes::Bytes;
+
+    fn publish_input(asset: Bytes) -> PublishListingInput {
+        PublishListingInput {
+            seller_wallet: "buyA5hR1Z9KtHQRBTmLkjsFfjAabDwdZtrRC6edqxAJ".into(),
+            display_name: None,
+            title: "Immutable asset".into(),
+            description: String::new(),
+            category: "art".into(),
+            price_usdc: "0".into(),
+            agent_friendly: false,
+            tags_raw: String::new(),
+            license: None,
+            content_hash: None,
+            asset_ct: "application/octet-stream".into(),
+            asset_data: asset,
+            preview_bytes: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn publish_stores_asset_under_sha256_key_and_rejects_overwrite() {
+        let (state, _tmp) = test_state(None).await;
+        let asset = Bytes::from_static(b"forge-escrow-step1");
+        let hash = content_sha256_hex(&asset);
+        let expected_key = asset_content_key(&hash);
+
+        let row = publish_listing(&state, publish_input(asset.clone()), Uuid::new_v4())
+            .await
+            .expect("first publish");
+        assert_eq!(row.content_hash.as_deref(), Some(hash.as_str()));
+        assert_eq!(row.asset_key, expected_key);
+        let (stored, _) = state.storage.get(&expected_key).await.unwrap();
+        assert_eq!(stored.as_ref(), asset.as_ref());
+
+        let err = publish_listing(&state, publish_input(asset), Uuid::new_v4())
+            .await
+            .unwrap_err();
+        match err {
+            AppError::Conflict(msg) => assert!(msg.contains("already exists")),
+            other => panic!("expected conflict, got {other:?}"),
+        }
+    }
 }
+

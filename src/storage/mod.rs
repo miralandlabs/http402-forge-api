@@ -42,6 +42,7 @@ pub trait ObjectStore: Send + Sync {
         content_type: &str,
         ttl_secs: u32,
     ) -> AppResult<PresignedPut>;
+    async fn put_if_absent(&self, key: &str, content_type: &str, data: Bytes) -> AppResult<()>;
 }
 
 pub enum Storage {
@@ -104,6 +105,13 @@ impl ObjectStore for Storage {
             Self::R2(s) => s.presign_put(key, content_type, ttl_secs).await,
         }
     }
+
+    async fn put_if_absent(&self, key: &str, content_type: &str, data: Bytes) -> AppResult<()> {
+        match self {
+            Self::Local(s) => s.put_if_absent(key, content_type, data).await,
+            Self::R2(s) => s.put_if_absent(key, content_type, data).await,
+        }
+    }
 }
 
 impl Storage {
@@ -133,4 +141,28 @@ pub fn object_key(prefix: &str, id: uuid::Uuid, filename: &str) -> String {
         })
         .collect();
     format!("{prefix}/{id}/{safe}")
+}
+
+pub fn content_sha256_hex(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(data))
+}
+
+pub fn asset_content_key(content_hash: &str) -> String {
+    format!("assets/{content_hash}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn content_sha256_hex_is_lowercase_64() {
+        let hash = content_sha256_hex(b"abc");
+        assert_eq!(
+            hash,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(asset_content_key(&hash), format!("assets/{hash}"));
+    }
 }

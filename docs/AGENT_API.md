@@ -189,7 +189,7 @@ Content-Type: multipart/form-data
 | `agent_friendly` | no | default false |
 | `tags` | no | Comma-separated or JSON array (agent-oriented listings) |
 | `license` | no | `personal` or `commercial` |
-| `content_hash` | no | Optional; if sent, **must equal** server SHA-256 of `asset`. Server always computes and stores hash from asset bytes. |
+| `content_hash` | no | Optional; if sent, **must equal** server SHA-256 of `asset`. Server always computes SHA-256 hex of asset bytes, stores the object at `assets/{sha256hex}`, and rejects the publish if that object key already exists. |
 | `asset` | yes | paid download file |
 | `preview` | no | optional teaser file (any MIME); PDF uploads are rasterized to JPEG for thumbnails; auto-generated if omitted (see below) |
 
@@ -323,6 +323,35 @@ GET /api/v1/listings/{id}/download
 **Removed listings:** no **402** — new buyers get **404**. Agents with a stored payment proof retry step 4 with the same `PAYMENT-SIGNATURE`; idempotency returns **200** without charging again.
 
 Idempotency: same payment signature returns the file without double-charging (checked via `payments` table). Works for both active and removed listings.
+
+The payment door accepts **only** `PAYMENT-SIGNATURE`. Oracle headers (`X-Forge-Oracle-Sig`, `X-Forge-Payment-Uid`, `X-Forge-Oracle-Ts`) are ignored here and never count as payment.
+
+**Immutable object keys:** on publish the API computes SHA-256 hex over the asset bytes, stores the object at `assets/{sha256hex}`, and **rejects** a `PUT` when that key already exists. `contentHash` on the listing is that digest and does not change.
+
+## Oracle verdict door (escrow listings only)
+
+Preview-cluster API for the payment’s named `oracle_authority`. Exact-rail listings **never** open this route.
+
+```http
+GET /api/v1/oracle/listings/{listing_id}/artifact
+X-Forge-Payment-Uid: <hex-64>
+X-Forge-Oracle-Ts: <unix-seconds>
+X-Forge-Oracle-Sig: <base58 Ed25519>
+```
+
+Sign this UTF-8 message (no JSON canonicalization):
+
+```text
+forge-oracle-v1|{listing_id}|{payment_uid_hex}|{ts}|{host}
+```
+
+`host` is the Forge API public host from `SELLER_PUBLIC_BASE_URL` (for example `preview.forge.http402.trade`). Replay window is **±60 seconds**.
+
+Forge accepts the request only when all of the following hold: the listing `deliveryScheme` is `escrow` (not `exact`); an escrow fund bind row exists for `(listing_id, payment_uid)`; `ts` is in the replay window; the signature verifies as the bind’s on-chain `oracle_authority`. Success streams the **same** stored object as the listing. This is **not** a sale: no HTTP 402, no `X-Forge-Sale-Id`, no `sales` row.
+
+Otherwise **403** and no asset bytes. Missing or invalid signatures return 403.
+
+A successful sla-escrow **fund** (buyer `PAYMENT-SIGNATURE` on the payment door) persists the bind row: `listing_id`, `payment_uid`, `content_hash`, and on-chain `oracle_authority`. Goods on the payment door still unlock only after later escrow release (not this step).
 
 ## Preview
 

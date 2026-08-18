@@ -216,8 +216,6 @@ pub async fn complete_upload(
             preview_bytes,
         },
         body.listing_id,
-        asset_key,
-        true,
     )
     .await?;
 

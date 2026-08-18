@@ -159,6 +159,14 @@ impl PaymentGate {
                 )
             })?;
 
+        if listing.delivery_scheme == "escrow" {
+            persist_escrow_fund_bind(state, listing, &settle, &proof).await?;
+            return Err(AppError::PaymentRequired(payment_required_with_error(
+                &pr,
+                "escrow funded; download unlocks after oracle release",
+            )?));
+        }
+
         let payer = settle
             .get("payer")
             .and_then(|v| v.as_str())
@@ -255,4 +263,166 @@ fn payment_required_with_error(pr: &PaymentRequired, msg: &str) -> AppResult<Val
     let mut copy = pr.clone();
     copy.error = Some(msg.to_string());
     payment_required_json(&copy).map_err(|e| AppError::Internal(anyhow::anyhow!("402: {e}")))
+}
+
+pub(crate) fn extract_escrow_fund_fields(
+    settle: &Value,
+    proof: &Value,
+) -> Result<(String, String), String> {
+    let payment_uid = first_str(
+        &[settle, proof],
+        &[
+            "/paymentUid",
+            "/payment_uid",
+            "/paymentPayload/payload/paymentUid",
+            "/paymentPayload/payload/payment_uid",
+            "/extra/paymentUid",
+            "/paymentRequirements/extra/paymentUid",
+        ],
+    )
+    .and_then(|raw| normalize_payment_uid(&raw))
+    .ok_or_else(|| "missing payment_uid".to_string())?;
+    let oracle_authority = first_str(
+        &[settle, proof],
+        &[
+            "/oracleAuthority",
+            "/oracle_authority",
+            "/paymentPayload/payload/oracleAuthority",
+            "/paymentPayload/payload/oracle_authority",
+            "/extra/oracleAuthority",
+            "/paymentRequirements/extra/oracleAuthority",
+        ],
+    )
+    .ok_or_else(|| "missing oracle_authority".to_string())?;
+    Ok((payment_uid, oracle_authority))
+}
+
+fn first_str(values: &[&Value], pointers: &[&str]) -> Option<String> {
+    for value in values {
+        for pointer in pointers {
+            if let Some(s) = value
+                .pointer(pointer)
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                return Some(s.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn normalize_payment_uid(raw: &str) -> Option<String> {
+    let hex = raw.trim().strip_prefix("0x").unwrap_or(raw.trim());
+    if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(hex.to_ascii_lowercase())
+}
+
+async fn persist_escrow_fund_bind(
+    state: &AppState,
+    listing: &ListingRow,
+    settle: &Value,
+    proof: &Value,
+) -> AppResult<crate::db::EscrowFundBind> {
+    let (payment_uid, oracle_authority) =
+        extract_escrow_fund_fields(settle, proof).map_err(|e| {
+            AppError::PaymentRequired(json!({ "error": format!("payment verification failed: {e}") }))
+        })?;
+    if !state
+        .config
+        .oracle_authorities
+        .iter()
+        .any(|a| a == &oracle_authority)
+    {
+        return Err(AppError::PaymentRequired(
+            json!({ "error": "payment verification failed: oracle_authority is not listed" }),
+        ));
+    }
+    let content_hash = listing.content_hash.clone().ok_or_else(|| {
+        AppError::PaymentRequired(json!({ "error": "payment verification failed: listing has no content_hash" }))
+    })?;
+    state
+        .db
+        .upsert_escrow_fund_bind(listing.id, &payment_uid, &content_hash, &oracle_authority)
+        .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::{Database, ListingRow};
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    fn escrow_listing(id: Uuid, hash: &str) -> ListingRow {
+        ListingRow {
+            id,
+            seller_wallet: "buyA5hR1Z9KtHQRBTmLkjsFfjAabDwdZtrRC6edqxAJ".into(),
+            display_name: None,
+            title: "escrow".into(),
+            description: String::new(),
+            category: "art".into(),
+            price_micro_usdc: 50_000,
+            preview_key: "p".into(),
+            preview_content_type: "text/plain".into(),
+            asset_key: format!("assets/{hash}"),
+            content_type: "application/octet-stream".into(),
+            byte_size: 4,
+            agent_friendly: false,
+            delivery_scheme: "escrow".into(),
+            status: "active".into(),
+            tags: "[]".into(),
+            license: None,
+            content_hash: Some(hash.into()),
+            moderation_status: "approved".into(),
+            moderation_labels: "[]".into(),
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn extract_escrow_fund_fields_from_settle_json() {
+        let uid = "ab".repeat(32);
+        let settle = json!({
+            "paymentUid": uid,
+            "oracleAuthority": "Oracle11111111111111111111111111111111111"
+        });
+        let proof = json!({});
+        let (got_uid, got_auth) = extract_escrow_fund_fields(&settle, &proof).unwrap();
+        assert_eq!(got_uid, uid);
+        assert_eq!(got_auth, "Oracle11111111111111111111111111111111111");
+    }
+
+    #[tokio::test]
+    async fn sla_escrow_fund_persists_bind_from_on_chain_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("forge.db");
+        let db = Database::connect(&format!("sqlite:{}", db_path.display()))
+            .await
+            .unwrap();
+        let listing_id = Uuid::new_v4();
+        let hash = "cd".repeat(32);
+        db.insert_listing(&escrow_listing(listing_id, &hash))
+            .await
+            .unwrap();
+        let uid = "ef".repeat(32);
+        let authority = "OracleAuthority11111111111111111111111111";
+        let settle = json!({
+            "paymentUid": uid,
+            "oracleAuthority": authority
+        });
+        let (got_uid, got_auth) = extract_escrow_fund_fields(&settle, &json!({})).unwrap();
+        let bind = db
+            .upsert_escrow_fund_bind(listing_id, &got_uid, &hash, &got_auth)
+            .await
+            .unwrap();
+        assert_eq!(bind.listing_id, listing_id);
+        assert_eq!(bind.payment_uid, uid);
+        assert_eq!(bind.content_hash, hash);
+        assert_eq!(bind.oracle_authority, authority);
+        assert_eq!(db.count_sales().await.unwrap(), 0);
+    }
 }

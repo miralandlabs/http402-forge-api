@@ -114,4 +114,59 @@ impl ObjectStore for LocalStorage {
             "presigned PUT requires STORAGE_BACKEND=r2".into(),
         ))
     }
+
+    async fn put_if_absent(&self, key: &str, content_type: &str, data: Bytes) -> AppResult<()> {
+        let path = self.path_for(key);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .await
+                .map_err(|e| AppError::Storage(e.to_string()))?;
+        }
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .await
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::AlreadyExists {
+                    AppError::Conflict(format!("object key already exists: {key}"))
+                } else {
+                    AppError::Storage(e.to_string())
+                }
+            })?;
+        file.write_all(&data)
+            .await
+            .map_err(|e| AppError::Storage(e.to_string()))?;
+        fs::write(self.meta_path(key), content_type)
+            .await
+            .map_err(|e| AppError::Storage(e.to_string()))?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::AppError;
+
+    #[tokio::test]
+    async fn put_if_absent_rejects_existing_object_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalStorage::new(dir.path().to_path_buf()).unwrap();
+        let key = "assets/abc";
+        store
+            .put_if_absent(key, "text/plain", Bytes::from_static(b"one"))
+            .await
+            .unwrap();
+        let err = store
+            .put_if_absent(key, "text/plain", Bytes::from_static(b"two"))
+            .await
+            .unwrap_err();
+        match err {
+            AppError::Conflict(msg) => assert!(msg.contains("already exists")),
+            other => panic!("expected conflict, got {other:?}"),
+        }
+        let (data, _) = store.get(key).await.unwrap();
+        assert_eq!(data.as_ref(), b"one");
+    }
 }
