@@ -41,7 +41,7 @@ impl FacilitatorClient {
         })
     }
 
-    pub async fn verify_and_settle(&self, body: &Value) -> Result<Value, FacilitatorError> {
+    pub async fn verify(&self, body: &Value) -> Result<Value, FacilitatorError> {
         let verify_res = self
             .client
             .post(self.verify_url.clone())
@@ -73,6 +73,11 @@ impl FacilitatorClient {
                 step: "verify",
             });
         }
+        Ok(verify_value)
+    }
+
+    pub async fn verify_and_settle(&self, body: &Value) -> Result<Value, FacilitatorError> {
+        let verify_value = self.verify(body).await?;
 
         let mut settle_body = body.clone();
         if let Some(cid) = verify_value

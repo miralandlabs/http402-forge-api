@@ -22,7 +22,10 @@ use crate::preview::{
     is_pdf_content_type,
 };
 use crate::state::SharedState;
-use crate::storage::{object_key, serve_object, DeliveryQuery, ObjectServeOptions, ObjectStore};
+use crate::storage::{
+    content_hash_hex, content_object_key, object_key, serve_object, DeliveryQuery, ObjectServeOptions,
+    ObjectStore,
+};
 use crate::x402::PaymentGate;
 
 #[derive(Debug, Deserialize)]
@@ -311,9 +314,27 @@ pub async fn download(
     Query(delivery_q): Query<DeliveryQuery>,
     headers: HeaderMap,
 ) -> AppResult<Response> {
+    if crate::oracle::has_oracle_artifact_headers(&headers) {
+        return Err(AppError::Forbidden(
+            "payment door does not accept oracle signatures".into(),
+        ));
+    }
     let row = state.db.get_listing_any(id).await?;
     let path = format!("/api/v1/listings/{id}/download");
     let payment = PaymentGate::check_download_active_or_paid(&state, &headers, &row, &path).await?;
+
+    if let Some(fund) = payment.as_ref().and_then(|p| p.escrow_fund.as_ref()) {
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({
+                "status": "escrow_funded",
+                "listingId": row.id,
+                "paymentUid": fund.payment_uid,
+                "oracleAuthority": fund.oracle_authority,
+            })),
+        )
+            .into_response());
+    }
 
     let Some(payment) = payment else {
         tracing::info!(
@@ -678,12 +699,6 @@ pub async fn create(
     // Final vault decision is in publish_listing (paid only). Early checks above are best-effort.
 
     let id = Uuid::new_v4();
-    let asset_key = object_key("assets", id, "asset");
-    state
-        .storage
-        .put(&asset_key, &asset_ct, asset_data.clone())
-        .await?;
-
     let row = publish_listing(
         &state,
         PublishListingInput {
@@ -702,8 +717,6 @@ pub async fn create(
             preview_bytes,
         },
         id,
-        asset_key,
-        true,
     )
     .await?;
 
@@ -736,8 +749,6 @@ pub(crate) async fn publish_listing(
     state: &SharedState,
     input: PublishListingInput,
     id: Uuid,
-    asset_key: String,
-    asset_already_stored: bool,
 ) -> AppResult<ListingRow> {
     validate_wallet(&input.seller_wallet).map_err(|m| AppError::validation("seller_wallet", m))?;
     validate_category(&input.category).map_err(|m| AppError::validation("category", m))?;
@@ -752,7 +763,7 @@ pub(crate) async fn publish_listing(
     validate_license(input.license.as_deref()).map_err(|m| AppError::validation("license", m))?;
     let tags = parse_tags_field(&input.tags_raw).map_err(|m| AppError::validation("tags", m))?;
 
-    let computed_hash = sha256_hex(&input.asset_data);
+    let computed_hash = content_hash_hex(&input.asset_data);
     if let Some(ref provided) = input.content_hash {
         if provided.trim().to_ascii_lowercase() != computed_hash {
             return Err(AppError::validation(
@@ -815,12 +826,11 @@ pub(crate) async fn publish_listing(
         )));
     }
 
-    if !asset_already_stored {
-        state
-            .storage
-            .put(&asset_key, &input.asset_ct, input.asset_data.clone())
-            .await?;
-    }
+    let asset_key = content_object_key(&computed_hash);
+    state
+        .storage
+        .put_if_absent(&asset_key, &input.asset_ct, input.asset_data.clone())
+        .await?;
 
     let (preview_key, preview_content_type) = store_listing_preview(
         state,
@@ -991,7 +1001,75 @@ async fn store_uploaded_preview(
     Ok((key, preview_ct.to_string()))
 }
 
-fn sha256_hex(data: &Bytes) -> String {
-    use sha2::{Digest, Sha256};
-    format!("{:x}", Sha256::digest(data))
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::{content_hash_hex, content_object_key};
+    use crate::test_harness::TestEnv;
+
+    fn seller_wallet() -> String {
+        bs58::encode([3u8; 32]).into_string()
+    }
+
+    fn publish_input(bytes: Bytes) -> PublishListingInput {
+        PublishListingInput {
+            seller_wallet: seller_wallet(),
+            display_name: None,
+            title: "Immutable asset".into(),
+            description: String::new(),
+            category: "text".into(),
+            price_usdc: "0".into(),
+            agent_friendly: false,
+            tags_raw: String::new(),
+            license: None,
+            content_hash: None,
+            asset_ct: "text/plain".into(),
+            asset_data: bytes,
+            preview_bytes: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn publish_uses_sha256_object_key_and_rejects_overwrite() {
+        let env = TestEnv::new().await;
+        let bytes = Bytes::from_static(b"forge-immutable-asset");
+        let hash = content_hash_hex(&bytes);
+        let id = Uuid::new_v4();
+        let row = publish_listing(&env.state, publish_input(bytes.clone()), id)
+            .await
+            .expect("first publish");
+        assert_eq!(row.content_hash.as_deref(), Some(hash.as_str()));
+        assert_eq!(row.asset_key, content_object_key(&hash));
+        let (stored, _) = env.state.storage.get(&row.asset_key).await.expect("stored");
+        assert_eq!(&stored[..], &bytes[..]);
+
+        let err = publish_listing(&env.state, publish_input(bytes), Uuid::new_v4())
+            .await
+            .unwrap_err();
+        match err {
+            AppError::Conflict(msg) => assert!(msg.contains("already exists")),
+            other => panic!("expected conflict, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn payment_door_rejects_oracle_signatures() {
+        let env = TestEnv::new().await;
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forge-oracle-sig", "not-a-real-sig".parse().unwrap());
+        let err = download(
+            State(env.state),
+            Path(Uuid::new_v4()),
+            Query(DeliveryQuery { delivery: None }),
+            headers,
+        )
+        .await
+        .unwrap_err();
+        match err {
+            AppError::Forbidden(msg) => {
+                assert!(msg.contains("payment door does not accept oracle signatures"));
+            }
+            other => panic!("expected forbidden, got {other:?}"),
+        }
+    }
 }

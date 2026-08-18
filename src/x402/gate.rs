@@ -1,4 +1,5 @@
 use crate::db::ListingRow;
+use crate::oracle::{extract_escrow_fund_fields, has_oracle_artifact_headers};
 use crate::x402::accepts::{build_accepts_for_listing, idempotency_key, listing_uses_escrow};
 use crate::x402::wire::{
     encode_payment_response, extract_payment_header_value, parse_payment_header,
@@ -12,11 +13,18 @@ use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
 #[derive(Debug, Clone)]
+pub struct EscrowFundInfo {
+    pub payment_uid: String,
+    pub oracle_authority: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct PaymentContext {
     pub payer_wallet: String,
     pub payment_signature: String,
     pub settle_proof: Value,
     pub already_paid: bool,
+    pub escrow_fund: Option<EscrowFundInfo>,
 }
 
 pub struct PaymentGate;
@@ -31,6 +39,12 @@ impl PaymentGate {
         listing: &ListingRow,
         canonical_path: &str,
     ) -> AppResult<Option<PaymentContext>> {
+        if has_oracle_artifact_headers(headers) {
+            return Err(AppError::Forbidden(
+                "payment door does not accept oracle signatures".into(),
+            ));
+        }
+
         if listing.price_micro_usdc == 0 {
             return Ok(None);
         }
@@ -145,6 +159,51 @@ impl PaymentGate {
                 payment_signature: existing.tx_signature,
                 settle_proof: json!({}),
                 already_paid: true,
+                escrow_fund: None,
+            }));
+        }
+
+        if use_escrow {
+            let verify = state.facilitator.verify(&proof).await.map_err(|e| {
+                AppError::PaymentRequired(
+                    payment_required_with_error(&pr, &format!("payment verification failed: {e}"))
+                        .unwrap_or(json!({ "error": "payment failed" })),
+                )
+            })?;
+            let (payment_uid, oracle_authority) = extract_escrow_fund_fields(&proof, &verify)
+                .ok_or_else(|| {
+                    AppError::Forbidden(
+                        "escrow fund missing payment_uid or oracle_authority".into(),
+                    )
+                })?;
+            if !state
+                .config
+                .oracle_authorities
+                .iter()
+                .any(|a| a == &oracle_authority)
+            {
+                return Err(AppError::Forbidden(
+                    "oracle_authority is not in ORACLE_AUTHORITIES".into(),
+                ));
+            }
+            let bind = state
+                .db
+                .persist_escrow_fund_bind(listing, &payment_uid, &oracle_authority)
+                .await?;
+            let payer = verify
+                .get("payer")
+                .and_then(|v| v.as_str())
+                .unwrap_or("anonymous")
+                .to_string();
+            return Ok(Some(PaymentContext {
+                payer_wallet: payer,
+                payment_signature: sig,
+                settle_proof: verify,
+                already_paid: false,
+                escrow_fund: Some(EscrowFundInfo {
+                    payment_uid: bind.payment_uid,
+                    oracle_authority: bind.oracle_authority,
+                }),
             }));
         }
 
@@ -188,6 +247,7 @@ impl PaymentGate {
             payment_signature: sig,
             settle_proof: settle,
             already_paid: false,
+            escrow_fund: None,
         }))
     }
 
@@ -197,6 +257,11 @@ impl PaymentGate {
         listing: &ListingRow,
         canonical_path: &str,
     ) -> AppResult<Option<PaymentContext>> {
+        if has_oracle_artifact_headers(headers) {
+            return Err(AppError::Forbidden(
+                "payment door does not accept oracle signatures".into(),
+            ));
+        }
         if listing.status == "active" {
             return Self::check_download(state, headers, listing, canonical_path).await;
         }
@@ -239,6 +304,7 @@ impl PaymentGate {
             payment_signature: existing.tx_signature,
             settle_proof: json!({}),
             already_paid: true,
+            escrow_fund: None,
         })
     }
 
