@@ -531,6 +531,46 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorBody" }
+  /api/v1/oracle/listings/{listing_id}/artifact:
+    get:
+      summary: Oracle verdict door (escrow listings only)
+      description: |
+        Streams the stored listing object for the oracle_authority bound to a funded sla-escrow
+        payment. Not a sale: no 402, no sales row, no X-Forge-Sale-Id.
+
+        Signed UTF-8 message: `forge-oracle-v1|{listing_id}|{payment_uid_hex}|{ts}|{host}`
+        where `host` is the Forge API public host and `ts` must be within ±60 seconds.
+
+        Exact-rail listings never open this route (403). The payment door
+        (`GET /api/v1/listings/{id}/download`) does not accept these oracle headers as payment.
+      parameters:
+        - in: path
+          name: listing_id
+          required: true
+          schema: { type: string, format: uuid }
+        - in: header
+          name: X-Forge-Payment-Uid
+          required: true
+          schema: { type: string }
+          description: 64-char hex payment_uid from sla-escrow fund
+        - in: header
+          name: X-Forge-Oracle-Ts
+          required: true
+          schema: { type: integer }
+          description: Unix seconds; must be within ±60s of server time
+        - in: header
+          name: X-Forge-Oracle-Sig
+          required: true
+          schema: { type: string }
+          description: Base58 Ed25519 signature over the verdict message
+      responses:
+        "200":
+          description: Asset file stream (same object as the payment door)
+        "403":
+          description: Missing/invalid signature, exact-rail listing, bind mismatch, or replay window
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorBody" }
   /api/v1/listings/{id}/redownload:
     get:
       summary: Re-download after prior purchase (wallet-signed)

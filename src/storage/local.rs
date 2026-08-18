@@ -54,6 +54,16 @@ impl ObjectStore for LocalStorage {
         Ok(())
     }
 
+    async fn put_if_absent(&self, key: &str, content_type: &str, data: Bytes) -> AppResult<()> {
+        let path = self.path_for(key);
+        if path.exists() {
+            return Err(AppError::Conflict(format!(
+                "object key already exists: {key}"
+            )));
+        }
+        self.put(key, content_type, data).await
+    }
+
     async fn get(&self, key: &str) -> AppResult<(Bytes, String)> {
         let path = self.path_for(key);
         if !path.exists() {
@@ -113,5 +123,30 @@ impl ObjectStore for LocalStorage {
         Err(AppError::Storage(
             "presigned PUT requires STORAGE_BACKEND=r2".into(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::AppError;
+    use crate::storage::ObjectStore;
+
+    #[tokio::test]
+    async fn put_if_absent_rejects_existing_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalStorage::new(dir.path().to_path_buf()).expect("store");
+        let key = "assets/abc123";
+        store
+            .put_if_absent(key, "text/plain", Bytes::from_static(b"one"))
+            .await
+            .expect("first put");
+        let err = store
+            .put_if_absent(key, "text/plain", Bytes::from_static(b"two"))
+            .await
+            .expect_err("overwrite");
+        assert!(matches!(err, AppError::Conflict(_)));
+        let (data, _) = store.get(key).await.expect("get");
+        assert_eq!(&data[..], b"one");
     }
 }

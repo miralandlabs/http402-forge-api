@@ -31,6 +31,8 @@ pub struct PresignedPut {
 #[async_trait]
 pub trait ObjectStore: Send + Sync {
     async fn put(&self, key: &str, content_type: &str, data: Bytes) -> AppResult<()>;
+    /// Store bytes only when `key` is absent. Existing keys are immutable.
+    async fn put_if_absent(&self, key: &str, content_type: &str, data: Bytes) -> AppResult<()>;
     async fn get(&self, key: &str) -> AppResult<(Bytes, String)>;
     async fn head(&self, key: &str) -> AppResult<String>;
     async fn object_size(&self, key: &str) -> AppResult<u64>;
@@ -55,6 +57,13 @@ impl ObjectStore for Storage {
         match self {
             Self::Local(s) => s.put(key, content_type, data).await,
             Self::R2(s) => s.put(key, content_type, data).await,
+        }
+    }
+
+    async fn put_if_absent(&self, key: &str, content_type: &str, data: Bytes) -> AppResult<()> {
+        match self {
+            Self::Local(s) => s.put_if_absent(key, content_type, data).await,
+            Self::R2(s) => s.put_if_absent(key, content_type, data).await,
         }
     }
 
@@ -119,6 +128,11 @@ impl Storage {
             }
         }
     }
+}
+
+/// Immutable asset object key: SHA-256 hex of the bytes at publish.
+pub fn content_addressed_asset_key(content_hash: &str) -> String {
+    format!("assets/{content_hash}")
 }
 
 pub fn object_key(prefix: &str, id: uuid::Uuid, filename: &str) -> String {

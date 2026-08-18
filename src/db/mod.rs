@@ -5,7 +5,9 @@ mod postgres;
 mod sales;
 mod sqlite;
 mod trust;
+mod escrow;
 
+pub use escrow::EscrowFundBindRow;
 pub use listing::ListingRow;
 pub use listing_filters::ListingFilterBinds;
 pub use payment::PaymentRow;
@@ -349,6 +351,52 @@ impl Database {
         match &self.backend {
             DbBackend::Postgres(pool) => postgres::listing_quality_stats(pool, listing_ids).await,
             DbBackend::Sqlite(pool) => sqlite::listing_quality_stats(pool, listing_ids).await,
+        }
+    }
+
+    pub async fn insert_escrow_fund_bind(
+        &self,
+        listing_id: uuid::Uuid,
+        payment_uid: &str,
+        content_hash: &str,
+        oracle_authority: &str,
+    ) -> AppResult<EscrowFundBindRow> {
+        match &self.backend {
+            DbBackend::Postgres(pool) => {
+                postgres::insert_escrow_fund_bind(
+                    pool,
+                    listing_id,
+                    payment_uid,
+                    content_hash,
+                    oracle_authority,
+                )
+                .await
+            }
+            DbBackend::Sqlite(pool) => {
+                sqlite::insert_escrow_fund_bind(
+                    pool,
+                    listing_id,
+                    payment_uid,
+                    content_hash,
+                    oracle_authority,
+                )
+                .await
+            }
+        }
+    }
+
+    pub async fn get_escrow_fund_bind(
+        &self,
+        listing_id: uuid::Uuid,
+        payment_uid: &str,
+    ) -> AppResult<Option<EscrowFundBindRow>> {
+        match &self.backend {
+            DbBackend::Postgres(pool) => {
+                postgres::get_escrow_fund_bind(pool, listing_id, payment_uid).await
+            }
+            DbBackend::Sqlite(pool) => {
+                sqlite::get_escrow_fund_bind(pool, listing_id, payment_uid).await
+            }
         }
     }
 }

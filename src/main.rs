@@ -5,6 +5,7 @@ mod error;
 mod logging;
 mod models;
 mod moderation;
+mod oracle;
 mod preview;
 mod rate_limit;
 mod routes;

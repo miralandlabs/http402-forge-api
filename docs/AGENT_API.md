@@ -324,6 +324,33 @@ GET /api/v1/listings/{id}/download
 
 Idempotency: same payment signature returns the file without double-charging (checked via `payments` table). Works for both active and removed listings.
 
+The payment door accepts **`PAYMENT-SIGNATURE` only**. Oracle verdict headers (`X-Forge-Oracle-Sig`, `X-Forge-Payment-Uid`, `X-Forge-Oracle-Ts`) are not payment and never unlock `/download`.
+
+## Oracle verdict (escrow listings only)
+
+Preview-cluster sla-escrow: after a successful **fund**, Forge stores a bind row (`listing_id`, `payment_uid`, `content_hash`, on-chain `oracle_authority`). The named oracle then fetches the **same** stored object through a separate verdict door. This is **not** a sale: no 402, no `sales` row, no `X-Forge-Sale-Id`.
+
+Exact-rail listings never open this route (**403**).
+
+```http
+GET /api/v1/oracle/listings/{listing_id}/artifact
+X-Forge-Payment-Uid: {64-char hex payment_uid}
+X-Forge-Oracle-Ts: {unix seconds}
+X-Forge-Oracle-Sig: {base58 Ed25519}
+```
+
+UTF-8 message (no JSON canonicalization):
+
+```text
+forge-oracle-v1|{listing_id}|{payment_uid_hex}|{ts}|{host}
+```
+
+`host` is the Forge API public host from `SELLER_PUBLIC_BASE_URL` (preview: `preview.forge.http402.trade`). Replay window: **±60 seconds**. Forge accepts only when the listing is escrow, a bind row exists for `(listing_id, payment_uid)`, the timestamp is in window, and the signature verifies as the bind `oracle_authority`. Otherwise **403** with no body bytes.
+
+Asset object keys are the lowercase SHA-256 hex of the bytes at publish (`assets/{sha256}`). A PUT to an existing object key is rejected.
+
+Production escrow and production `ORACLE_AUTHORITIES` rollout are **not** enabled by this API-only step. Upload size still rejects at the exact-lane ceiling (default 100 MiB).
+
 ## Preview
 
 ```http

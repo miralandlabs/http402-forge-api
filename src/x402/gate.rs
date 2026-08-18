@@ -1,5 +1,6 @@
 use crate::db::ListingRow;
 use crate::x402::accepts::{build_accepts_for_listing, idempotency_key, listing_uses_escrow};
+use crate::x402::escrow::escrow_fund_bind_from_wire;
 use crate::x402::wire::{
     encode_payment_response, extract_payment_header_value, parse_payment_header,
     payment_required_json, PaymentRequired, ResourceInfo,
@@ -171,6 +172,14 @@ impl PaymentGate {
             .unwrap_or("")
             .to_string();
 
+        if use_escrow {
+            persist_escrow_fund_bind(state, listing, &settle, &proof).await?;
+            return Err(AppError::PaymentRequired(payment_required_with_error(
+                &pr,
+                "escrow funded; download unlocks after oracle release",
+            )?));
+        }
+
         state
             .db
             .record_payment_and_sale(
@@ -255,4 +264,38 @@ fn payment_required_with_error(pr: &PaymentRequired, msg: &str) -> AppResult<Val
     let mut copy = pr.clone();
     copy.error = Some(msg.to_string());
     payment_required_json(&copy).map_err(|e| AppError::Internal(anyhow::anyhow!("402: {e}")))
+}
+
+async fn persist_escrow_fund_bind(
+    state: &AppState,
+    listing: &ListingRow,
+    settle: &Value,
+    proof: &Value,
+) -> AppResult<()> {
+    let content_hash = listing
+        .content_hash
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| AppError::Forbidden("escrow listing missing content_hash".into()))?;
+    let Some((payment_uid, oracle_authority)) = escrow_fund_bind_from_wire(settle, proof) else {
+        return Err(AppError::Forbidden(
+            "escrow fund missing payment_uid or oracle_authority".into(),
+        ));
+    };
+    if !state
+        .config
+        .oracle_authorities
+        .iter()
+        .any(|a| a == &oracle_authority)
+    {
+        return Err(AppError::Forbidden(
+            "oracle_authority is not configured on this host".into(),
+        ));
+    }
+    state
+        .db
+        .insert_escrow_fund_bind(listing.id, &payment_uid, content_hash, &oracle_authority)
+        .await?;
+    Ok(())
 }

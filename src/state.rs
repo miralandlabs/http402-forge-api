@@ -72,3 +72,93 @@ impl AppState {
 }
 
 pub type SharedState = Arc<AppState>;
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use crate::config::{
+        AppConfig, ClusterConfig, ModerationConfig, ModerationProvider, ObjectDelivery,
+        SolanaCluster, StorageBackend, DEFAULT_ESCROW_SIZE_THRESHOLD_BYTES, DEFAULT_MAX_ASSET_BYTES,
+        DEFAULT_MAX_PREVIEW_BYTES,
+    };
+    use crate::db::Database;
+
+    use super::{AppState, SharedState};
+
+    pub fn test_config(
+        database_url: String,
+        local_storage_path: PathBuf,
+        facilitator_base_url: String,
+        seller_public_base_url: String,
+        oracle_authorities: Vec<String>,
+    ) -> AppConfig {
+        AppConfig {
+            cluster: SolanaCluster::Devnet,
+            bind_addr: "127.0.0.1:0".parse().expect("bind"),
+            seller_public_base_url,
+            database_url,
+            facilitator_base_url,
+            facilitator_timeout_secs: 5,
+            payment_timeout_secs: 300,
+            storage_backend: StorageBackend::Local,
+            local_storage_path,
+            r2_account_id: None,
+            r2_bucket: None,
+            r2_access_key_id: None,
+            r2_secret_access_key: None,
+            max_asset_bytes: DEFAULT_MAX_ASSET_BYTES,
+            max_preview_bytes: DEFAULT_MAX_PREVIEW_BYTES,
+            preview_media_seconds: 30,
+            ffmpeg_bin: "ffmpeg".into(),
+            pdftoppm_bin: "pdftoppm".into(),
+            gs_bin: "gs".into(),
+            mutool_bin: "mutool".into(),
+            escrow_size_threshold: DEFAULT_ESCROW_SIZE_THRESHOLD_BYTES,
+            platform_fee_bps: 0,
+            platform_fee_wallet: None,
+            oracle_authorities,
+            oracle_profile_id: "x402/oracles/file-delivery/attestation/v1".into(),
+            skip_seller_vault_check: true,
+            skip_seller_auth: true,
+            skip_buyer_auth: true,
+            moderation: ModerationConfig {
+                provider: ModerationProvider::None,
+                openai_api_key: None,
+                fail_closed: false,
+            },
+            cors_allowed_origins: vec!["http://127.0.0.1:5175".into()],
+            object_delivery: ObjectDelivery::Proxy,
+            presign_ttl_secs: 300,
+            version: "0.1.0-test".into(),
+            leaderboard_limit: 5,
+        }
+    }
+
+    pub async fn test_state(
+        facilitator_base_url: String,
+        seller_public_base_url: String,
+        oracle_authorities: Vec<String>,
+    ) -> (SharedState, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("forge.db");
+        let objects = dir.path().join("objects");
+        let database_url = format!("sqlite:{}", db_path.display());
+        let config = test_config(
+            database_url.clone(),
+            objects,
+            facilitator_base_url,
+            seller_public_base_url,
+            oracle_authorities,
+        );
+        let cluster = ClusterConfig::for_cluster(config.cluster);
+        let db = Database::connect(&database_url).await.expect("db");
+        let state = Arc::new(
+            AppState::build(config, cluster, db)
+                .await
+                .expect("app state"),
+        );
+        (state, dir)
+    }
+}
