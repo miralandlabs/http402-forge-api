@@ -145,11 +145,11 @@ Preview and production stacks require sellers to activate a pr402 SplitVault bef
 
 The Sell UI calls `GET /api/v1/seller/status` and `POST /api/v1/seller/provision-tx`. Listing uploads are signature-only (no USDC); vault activation costs a small amount of **SOL** once per wallet.
 
-See [docs/SELLER_GUIDE.md](../docs/SELLER_GUIDE.md).
+See [docs/SELLER_GUIDE.md](../../docs/SELLER_GUIDE.md).
 
 ## Trust & moderation (optional)
 
-Defaults keep behavior unchanged (`MODERATION_PROVIDER=none`). See [docs/AGENT_API.md](../docs/AGENT_API.md) and [docs/openapi.yaml](../docs/openapi.yaml).
+Defaults keep behavior unchanged (`MODERATION_PROVIDER=none`). See [docs/AGENT_API.md](../../docs/AGENT_API.md) and [docs/openapi.yaml](../../docs/openapi.yaml).
 
 | Env | Purpose |
 |-----|---------|
